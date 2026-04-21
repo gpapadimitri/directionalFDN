@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src", "src.*"]
+
+[project]
+name = "directional_fdn"
+version = "0.1.0"
+description = "Directional Feedback Delay Network (DFDN) for Ambisonics RIR synthesis"
+requires-python = ">=3.10"
+license = "MIT"
+authors = [
+    { name = "George Papadimitriou", email = "papadimitriou@arch.ethz.ch" },
+]
+dependencies = [
+    "numpy>=1.24",
+    "scipy>=1.10",
+    "pyfar>=0.8",
+    "spharpy>=1.0",
+    "pyrato>=1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7",
+    "ruff",
+    "matplotlib",
+    "soundfile",
+]
+
+[tool.ruff]
+line-length = 92
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
