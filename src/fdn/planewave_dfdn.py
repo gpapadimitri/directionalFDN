@@ -53,7 +53,7 @@ from scipy.signal import lfilter, tf2zpk, zpk2tf
 from scipy.linalg import hadamard
 
 from . import spatial
-from .delay_line import DelayLine, generate_coprime_delay_lengths
+from .delay_line import DelayLine, generate_distinct_delay_lengths
 from .feedback_matrix import FeedbackMatrix, FeedbackMatrixType
 from .filter_fitting import (
     interpolate_magnitude_spectrum,
@@ -67,32 +67,91 @@ from ..utils import db2lin
 _SPEED_OF_SOUND = 343.0
 
 
-def air_absorption_db_per_meter(freqs: NDArray) -> NDArray:
-    """ISO 9613-1 atmospheric absorption at 20 °C, 50 %% humidity.
+def air_absorption_db_per_meter(
+    freqs: NDArray,
+    temperature_c: float = 20.0,
+    humidity_percent: float = 50.0,
+    pressure_kpa: float = 101.325,
+) -> NDArray:
+    """Atmospheric absorption coefficient (dB/m) per ISO 9613-1:1993.
+
+    Implements the full O\u2082 / N\u2082 vibrational-relaxation model, valid
+    roughly for 50\u202fHz \u2013 10\u202fMHz, 0\u2013100\u202f% relative humidity, and a wide
+    temperature range. Returns positive values (attenuation).
 
     Parameters
     ----------
     freqs : NDArray
         Frequencies in Hz.
+    temperature_c : float
+        Air temperature in degrees Celsius.
+    humidity_percent : float
+        Relative humidity in percent (0\u2013100).
+    pressure_kpa : float
+        Ambient atmospheric pressure in kPa (reference 101.325).
 
     Returns
     -------
     NDArray
-        Absorption coefficient in dB/m (positive values = attenuation).
+        Absorption coefficient \u03b1 in dB/m.
+
+    References
+    ----------
+    ISO 9613-1:1993, "Acoustics \u2014 Attenuation of sound during propagation
+    outdoors \u2014 Part 1: Calculation of the absorption of sound by the
+    atmosphere."
     """
-    # Simplified ISO 9613-1 model (T=20°C, h=50%)
-    return 5.5e-4 * (50.0 / 50.0) * (np.asarray(freqs) / 1000.0) ** 1.7
+    f = np.asarray(freqs, dtype=float)
+    T = temperature_c + 273.15           # K
+    T0 = 293.15                          # reference temperature (20 \u00b0C)
+    T01 = 273.16                         # triple point of water
+    pa = pressure_kpa
+    pr = 101.325                         # reference pressure
+    pa_pr = pa / pr
+
+    # Saturation vapour pressure ratio psat/pr (ISO 9613-1, Annex B)
+    V = 10.79586 * (1.0 - T01 / T) \
+        - 5.02808 * np.log10(T / T01) \
+        + 1.50474e-4 * (1.0 - 10.0 ** (-8.29692 * (T / T01 - 1.0))) \
+        + 0.42873e-3 * (-1.0 + 10.0 ** (4.76955 * (1.0 - T01 / T))) \
+        - 2.2195983
+    psat_pr = 10.0 ** V
+
+    # Molar concentration of water vapour, %
+    h = humidity_percent * psat_pr / pa_pr
+
+    # Relaxation frequencies (Hz) for O2 and N2
+    frO = pa_pr * (
+        24.0 + 4.04e4 * h * (0.02 + h) / (0.391 + h)
+    )
+    frN = pa_pr * (T / T0) ** -0.5 * (
+        9.0 + 280.0 * h * np.exp(-4.170 * ((T / T0) ** (-1.0 / 3.0) - 1.0))
+    )
+
+    # Absorption coefficient \u03b1 in nepers/m, then convert to dB/m
+    f2 = f * f
+    alpha = (
+        8.686 * f2 * (
+            1.84e-11 * (1.0 / pa_pr) * np.sqrt(T / T0)
+            + (T / T0) ** -2.5 * (
+                0.01275 * np.exp(-2239.1 / T) / (frO + f2 / frO)
+                + 0.1068 * np.exp(-3352.0 / T) / (frN + f2 / frN)
+            )
+        )
+    )
+    return alpha
 
 
 def delay_range_from_room(
     room: tuple[float, float, float],
     speed_of_sound: float = _SPEED_OF_SOUND,
+    spread: tuple[float, float] = (0.4, 2.0),
 ) -> tuple[float, float]:
     """Compute FDN delay range (ms) from room dimensions.
 
-    The range spans from the shortest axis to the room diagonal,
-    converted to milliseconds.  This ensures delay lines cover the
-    full range of path lengths between successive wall reflections.
+    The range brackets the **mean free path** τ = 4V/(Sc) (Sabine), which
+    is the standard FDN heuristic (Jot).  The room diagonal is *not* a
+    physically meaningful upper bound for inter-reflection delay times.
 
     Parameters
     ----------
@@ -100,6 +159,10 @@ def delay_range_from_room(
         Room dimensions in metres.
     speed_of_sound : float
         Speed of sound in m/s.
+    spread : (float, float)
+        Multiplicative spread around the mean free path. Default
+        (0.4, 2.0) — wide enough to provide ~688 distinct integer delay
+        lengths in typical rooms (NQ for sh_order=3, N=8).
 
     Returns
     -------
@@ -107,12 +170,12 @@ def delay_range_from_room(
         Delay range in milliseconds.
     """
     Lx, Ly, Lz = room
-    d_min = min(Lx, Ly, Lz)
-    d_max = np.sqrt(Lx**2 + Ly**2 + Lz**2)
-    return (
-        1000.0 * d_min / speed_of_sound,
-        1000.0 * d_max / speed_of_sound,
-    )
+    V = Lx * Ly * Lz
+    S = 2.0 * (Lx * Ly + Ly * Lz + Lx * Lz)
+    mean_free_path = 4.0 * V / S
+    tau_ms = 1000.0 * mean_free_path / speed_of_sound
+    return (spread[0] * tau_ms, spread[1] * tau_ms)
+
 
 
 # ---------------------------------------------------------------------------
@@ -133,13 +196,25 @@ def shoebox_reflections(
     source: tuple[float, float, float],
     receiver: tuple[float, float, float],
     sample_rate: float,
-    wall_reflectivity: float | tuple[float, float, float, float, float, float] = 0.5,
+    t60_broadband_s: float,
     speed_of_sound: float = 343.0,
+    alpha_per_wall: tuple[float, float, float, float, float, float] | None = None,
+    model: str = "eyring",
 ) -> list[Reflection]:
     """Compute first-order image-source reflections for a shoebox room.
 
     Returns 6 :class:`Reflection` objects (one per wall), sorted by
     arrival time, suitable for :meth:`PlaneWaveDFDN.set_early_reflections`.
+
+    The pressure reflection coefficient is derived from the broadband T60
+    via Sabine's formula, so the ER gains are physically consistent with
+    the late-reverb absorption:
+
+    .. math::
+        \\alpha = \\frac{0.161\\,V}{S\\,T_{60}}, \\qquad
+        r_{\\text{wall}} = \\sqrt{1 - \\alpha}
+
+    where *S* is the total wall area and *V* the room volume.
 
     Parameters
     ----------
@@ -151,10 +226,9 @@ def shoebox_reflections(
         Receiver position in metres.
     sample_rate : float
         Sample rate (Hz) — used to convert distances to delay_samples.
-    wall_reflectivity : float or 6-tuple of floats
-        Pressure reflection coefficient per wall (0–1).  If scalar, all
-        six walls share the same value.  If a tuple, order is:
-        (x=0, x=Lx, y=0, y=Ly, z=0, z=Lz).
+    t60_broadband_s : float
+        Broadband reverberation time in seconds.  Used to derive the
+        wall pressure reflection coefficient via Sabine's formula.
     speed_of_sound : float
         Speed of sound in m/s.
 
@@ -163,14 +237,38 @@ def shoebox_reflections(
     list[Reflection]
         Six first-order reflections sorted by delay (earliest first).
     """
+    import warnings
+
     Lx, Ly, Lz = room
     sx, sy, sz = source
     rx, ry, rz = receiver
 
-    if isinstance(wall_reflectivity, (int, float)):
-        refl = (float(wall_reflectivity),) * 6
-    else:
-        refl = tuple(wall_reflectivity)
+    # Derive wall reflectivity from T60.  Default: Eyring inversion
+    # (α = 1 − exp(−0.161 V/(S T60))), which stays physical for high
+    # absorption.  Sabine (α = 0.161 V/(S T60)) is available for legacy
+    # parity but warns / clips when α ≥ 1.
+    if alpha_per_wall is None:
+        V = Lx * Ly * Lz
+        S = 2.0 * (Lx * Ly + Ly * Lz + Lx * Lz)
+        if model == "eyring":
+            alpha = 1.0 - np.exp(-0.161 * V / (S * t60_broadband_s))
+        elif model == "sabine":
+            alpha = 0.161 * V / (S * t60_broadband_s)
+        else:
+            raise ValueError(f"Unknown model {model!r}; use 'eyring' or 'sabine'.")
+        if alpha >= 1.0:
+            warnings.warn(
+                f"Derived α={alpha:.3f} ≥ 1 (T60={t60_broadband_s:.2f}s is "
+                f"too long for room volume V={V:.1f} m³, S={S:.1f} m²). "
+                "Clipping to 0.999.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            alpha = 0.999
+        alpha_per_wall = (alpha,) * 6
+    if len(alpha_per_wall) != 6:
+        raise ValueError("alpha_per_wall must have 6 entries (one per wall).")
+    refl = tuple(float(np.sqrt(max(0.0, 1.0 - a))) for a in alpha_per_wall)
 
     # Image sources: mirror the source across each wall
     image_sources = [
@@ -194,8 +292,12 @@ def shoebox_reflections(
         dist = np.sqrt(dx**2 + dy**2 + dz**2)
         dist = max(dist, 1e-6)
 
-        # Gain: wall reflectivity × inverse-distance law (relative to direct)
-        gain = r * (d_direct / dist)
+        # Gain: wall reflectivity × absolute inverse-distance law (1/r).
+        # Using absolute amplitude (not normalised to d_direct) keeps ref.gain
+        # on the same scale as direct_gain = 1/d_direct, so that the ER/direct
+        # amplitude ratio is r_wall × d_direct/dist — the physically correct
+        # image-source value.
+        gain = r / dist
 
         # Direction from receiver to image source
         azimuth = float(np.arctan2(dy, dx))
@@ -398,7 +500,13 @@ class PlaneWaveDFDN:
         *N* — number of delay-line groups.
     sh_order : int
         SH order *L* controlling grid density: Q ≥ (L+1)².
-        Also defines the Ambisonics output order.
+    output_sh_order : int, optional
+        SH order of the rendered Ambisonics RIR.  Defaults to *sh_order*.
+        Setting this lower than *sh_order* lets you keep a dense plane-wave
+        grid (better directional resolution inside the FDN) while emitting
+        a lower-order Ambisonics output (e.g. ``sh_order=3``,
+        ``output_sh_order=1`` to render a FOA RIR).
+        Must satisfy ``output_sh_order <= sh_order``.
     frame_size : int
         Processing block size in samples.
     seed : int, optional
@@ -412,16 +520,25 @@ class PlaneWaveDFDN:
         sh_order: int = 2,
         frame_size: int = 64,
         seed: int | None = None,
+        output_sh_order: int | None = None,
     ) -> None:
         self.sample_rate = sample_rate
         self.num_delay_line_groups = num_delay_line_groups  # N
         self.sh_order = sh_order
+        if output_sh_order is None:
+            output_sh_order = sh_order
+        if output_sh_order > sh_order:
+            raise ValueError(
+                f"output_sh_order ({output_sh_order}) must not exceed "
+                f"sh_order ({sh_order})."
+            )
+        self.output_sh_order = output_sh_order
         self.Q = spatial.num_channels(sh_order)  # grid points
         self.frame_size = frame_size
         self.seed = seed
 
         self.total_delay_lines = num_delay_line_groups * self.Q  # N × Q
-        self.num_outputs = self.Q  # Ambisonics channels (L+1)²
+        self.num_outputs = (output_sh_order + 1) ** 2  # Ambisonics channels
 
         # State
         self.delay_lines: list[DelayLine] | None = None
@@ -477,6 +594,8 @@ class PlaneWaveDFDN:
         warp_factor: float = 0.0,
         feedback_type: FeedbackMatrixType = FeedbackMatrixType.RANDOM,
         air_absorption: bool = False,
+        lateral_mix: float = 0.0,
+        lambda_group: int = 0,
         rng: np.random.Generator | None = None,
     ) -> None:
         """Initialise all components of the plane-wave DFDN.
@@ -504,10 +623,27 @@ class PlaneWaveDFDN:
             All-pass warping coefficient for Prony fitting.
         feedback_type : FeedbackMatrixType
             Type of base N×N feedback matrix.
+        lateral_mix : float, optional
+            Inter-direction mixing strength in [0, 1].  ``0`` (default,
+            faithful to ICASSP 2020) uses ``A ⊗ I_Q`` and preserves
+            per-direction T60.  ``1`` uses ``A ⊗ H_Q`` (full Hadamard
+            mixing across directions per feedback iteration), which
+            improves late-reverb isotropy at the cost of directional T60
+            accuracy.  Intermediate values interpolate via the matrix
+            exponential ``M_Q = exp(lateral_mix · log H_Q)``.
+        lambda_group : int, optional
+            Index of the delay-line group that receives the early-reflection
+            re-injection ``s'(n)`` (Eq. 12).  Default ``0``.
         rng : np.random.Generator, optional
         """
         # 0. Spatial grid (may update self.Q for quadrature grids)
         self._init_grid()
+        if not (0 <= lambda_group < self.num_delay_line_groups):
+            raise ValueError(
+                f"lambda_group must be in [0, {self.num_delay_line_groups}), "
+                f"got {lambda_group}."
+            )
+        self._lambda_group = int(lambda_group)
 
         N, F = self.num_delay_line_groups, self.frame_size
         Q = self.Q  # read AFTER grid init, since Q may have changed
@@ -515,13 +651,13 @@ class PlaneWaveDFDN:
         # 1. Delay-line lengths — independent per channel (ICASSP Sec. 3)
         if rng is None and self.seed is not None:
             rng = np.random.default_rng(self.seed)
-        all_lengths = generate_coprime_delay_lengths(
+        all_lengths = generate_distinct_delay_lengths(
             delay_range_ms, N * Q, self.sample_rate, rng=rng
         )
         self.delay_length_samps = all_lengths
 
-        # 2. Feedback matrix A ⊗ I_Q (same Kronecker structure)
-        self._init_kronecker_feedback(feedback_type)
+        # 2. Feedback matrix A ⊗ M_Q (M_Q = I_Q by default per ICASSP 2020)
+        self._init_kronecker_feedback(feedback_type, lateral_mix=lateral_mix)
 
         # 3. Per-direction absorption
         t60 = np.asarray(t60_per_direction_ms, dtype=float)
@@ -584,7 +720,7 @@ class PlaneWaveDFDN:
         if self.grid_azimuths is None:
             raise RuntimeError("Call setup() before set_early_reflections().")
         self._early_reflections = EarlyReflectionModule(
-            reflections, self.sh_order,
+            reflections, self.output_sh_order,
         )
 
     # ==================================================================
@@ -594,38 +730,45 @@ class PlaneWaveDFDN:
     def _init_ambisonics_encoding(self) -> None:
         """Build Ambisonics encoding matrix E.
 
-        Shape: ((L+1)², Q) — maps Q grid signals to Ambisonics.
+        Shape: ((L_out+1)², Q) — maps Q grid signals to Ambisonics.
 
-        With a proper quadrature grid (t-design of degree 2L) and SN3D
-        normalisation, we use ``E = Y^T · √(4π / Q)``.  This is the
-        energy-preserving encoding for Q uncorrelated equal-power grid
-        signals:  ``E[|a_lm|²] = σ² / (2l+1)`` — the correct SN3D
-        diffuse-field power spectrum.
+        With a t-design grid of degree 2L and SN3D normalisation,
+        ``(4π/Q) Yᵀ Y = diag(1/(2l+1))`` (NOT identity).  We use
+        ``E = Yᵀ · √(4π/Q)``, which is the SN3D plane-wave-decomposition
+        encoder: it preserves total energy under the spatially-white
+        (isotropic) assumption that matches the late reverb's grid
+        statistics.  IMPORTANT: this encoder does NOT reproduce a
+        unit-amplitude single plane wave from a single grid point—that
+        requires the ``(2l+1)`` per-degree compensation applied in the
+        ER path (see :meth:`_build_er_grid_signal`).  Do not 'fix' the
+        SN3D scaling here without also revisiting that path.
+
+        No SH-order truncation compensation is applied: when
+        ``output_sh_order < sh_order`` the higher-order spatial detail
+        is discarded; boosting only the reverb path would break the
+        balance with the direct and early-reflection paths.
         """
-        # Y matrix: (Q, (L+1)²) in SN3D
+        # Y matrix: (Q, (L_out+1)²) in SN3D — uses output_sh_order
         Y = spatial.encode_directions(
-            self.grid_azimuths, self.grid_elevations, self.sh_order
+            self.grid_azimuths, self.grid_elevations, self.output_sh_order
         )
-        # Energy-preserving SN3D encoding for uncorrelated grid signals
-        self._encoding_matrix = Y.T * np.sqrt(4.0 * np.pi / self.Q)  # ((L+1)², Q)
+        self._encoding_matrix = Y.T * np.sqrt(4.0 * np.pi / self.Q)  # ((L_out+1)², Q)
 
     # ==================================================================
     # Kronecker feedback
     # ==================================================================
 
     def _init_kronecker_feedback(
-        self, matrix_type: FeedbackMatrixType
+        self, matrix_type: FeedbackMatrixType, lateral_mix: float = 0.0,
     ) -> None:
-        """Build A ⊗ H_Q — Kronecker feedback with inter-direction mixing.
+        """Build A ⊗ M_Q feedback.
 
-        Uses A ⊗ H_Q instead of A ⊗ I_Q so that directions are coupled
-        through the feedback loop.  This diffuses directional energy
-        over time, eliminating directional spikes in late reverb while
-        preserving per-channel absorption for early directional T60
-        control.
-
-        H_Q is a Q×Q normalized Hadamard matrix (when Q is a power of
-        2) or a random orthogonal matrix otherwise.
+        ``M_Q = exp(lateral_mix · log H_Q)`` interpolates unitarily
+        between the identity (``lateral_mix=0``, paper-faithful) and the
+        Q×Q normalised Hadamard / random-orthogonal matrix
+        (``lateral_mix=1``).  ``lateral_mix=0`` preserves per-direction
+        T60 exactly (no inter-direction coupling); larger values diffuse
+        directional energy at the cost of directional T60 accuracy.
         """
         self._base_feedback = FeedbackMatrix(
             self.num_delay_line_groups,
@@ -634,23 +777,31 @@ class PlaneWaveDFDN:
             seed=self.seed,
         )
         Q = self.Q
-        # Build Q×Q unitary mixing matrix
-        if Q > 0 and (Q & (Q - 1)) == 0:
-            H_Q = hadamard(Q).astype(float) / np.sqrt(Q)
+        if lateral_mix <= 0.0:
+            M_Q = np.eye(Q)
         else:
-            rng = np.random.default_rng(
-                self.seed + 7777 if self.seed is not None else None
-            )
-            M = rng.standard_normal((Q, Q))
-            H_Q, _ = np.linalg.qr(M)
-        self._kronecker_matrix = np.kron(self._base_feedback.matrix, H_Q)
+            if Q > 0 and (Q & (Q - 1)) == 0:
+                H_Q = hadamard(Q).astype(float) / np.sqrt(Q)
+            else:
+                rng = np.random.default_rng(
+                    self.seed + 7777 if self.seed is not None else None
+                )
+                M = rng.standard_normal((Q, Q))
+                H_Q, _ = np.linalg.qr(M)
+            if lateral_mix >= 1.0:
+                M_Q = H_Q
+            else:
+                # Unitary interpolation via matrix log/exp
+                from scipy.linalg import logm, expm
+                M_Q = np.real(expm(float(lateral_mix) * logm(H_Q)))
+        self._kronecker_matrix = np.kron(self._base_feedback.matrix, M_Q)
         # Verify unitarity
         NQ = self.total_delay_lines
         err = np.linalg.norm(
             self._kronecker_matrix.T @ self._kronecker_matrix - np.eye(NQ),
             "fro",
         )
-        if err > 1e-10:
+        if err > 1e-8:
             raise RuntimeError(
                 f"Kronecker feedback matrix unitarity error: {err:.2e}"
             )
@@ -674,17 +825,18 @@ class PlaneWaveDFDN:
     ) -> NDArray:
         """Build direct-path gain vector in Ambisonics domain.
 
-        Scales by ``1 / √N`` to match the output gain structure where
-        ``c`` sums N groups at unit gain.  This yields a DRR consistent
-        with the reverb level (approximately −10 dB for typical setups).
+        Returns the unit-amplitude SH encoding of the source direction.
+        Direct-to-reverberant ratio is controlled by the user-supplied
+        ``direct_gain`` and ``reverb_gain`` knobs at render time, not by
+        an implicit ``1/√N`` factor (which would silently couple DRR to
+        the number of delay-line groups).
 
         Returns shape ((L+1)², 1).
         """
-        N = self.num_delay_line_groups
         y_src = spatial.encode_direction(
-            source_azimuth, source_elevation, self.sh_order,
-        )  # ((L+1)²,)
-        return (y_src / np.sqrt(N)).reshape(-1, 1)
+            source_azimuth, source_elevation, self.output_sh_order,
+        )  # ((L_out+1)²,)
+        return y_src.reshape(-1, 1)
 
     # ==================================================================
     # Output encoding
@@ -716,6 +868,9 @@ class PlaneWaveDFDN:
         source_azimuth: float = 0.0,
         source_elevation: float = 0.0,
         length_seconds: float = 1.0,
+        direct_gain: float = 1.0,
+        er_gain: float = 1.0,
+        reverb_gain: float = 1.0,
     ) -> NDArray:
         """Generate an Ambisonics RIR.
 
@@ -725,10 +880,23 @@ class PlaneWaveDFDN:
             Source direction in radians.
         length_seconds : float
             Duration of the impulse response.
+        direct_gain : float
+            Linear gain applied to the direct-path impulse.  Set to
+            ``1 / distance`` (in metres) to match a 1/r free-field law.
+            Defaults to 1.0.
+        er_gain : float
+            Additional linear scale factor applied to all early reflections.
+            Use to adjust the direct-to-reverb balance independently of
+            ``wall_reflectivity``.  Defaults to 1.0 (no change).
+        reverb_gain : float
+            Linear scale factor applied to the FDN input vector ``b``,
+            globally attenuating (or boosting) the late-reverb buildup
+            from the omnidirectional source-to-FDN path.  Use to lower
+            the overall direct-to-reverberant ratio.  Defaults to 1.0.
 
         Returns
         -------
-        NDArray, shape ((L+1)², num_samples)
+        NDArray, shape ((L_out+1)², num_samples)
             Ambisonics RIR in ACN/SN3D format.
         """
         num_samples = int(length_seconds * self.sample_rate)
@@ -738,13 +906,20 @@ class PlaneWaveDFDN:
         impulse = np.zeros((1, num_samples))
         impulse[0, 0] = 1.0
 
-        return self.process(impulse, source_azimuth, source_elevation)
+        return self.process(
+            impulse, source_azimuth, source_elevation,
+            direct_gain=direct_gain, er_gain=er_gain,
+            reverb_gain=reverb_gain,
+        )
 
     def process(
         self,
         input_data: NDArray,
         source_azimuth: float = 0.0,
         source_elevation: float = 0.0,
+        direct_gain: float = 1.0,
+        er_gain: float = 1.0,
+        reverb_gain: float = 1.0,
     ) -> NDArray:
         """Process mono input through the plane-wave DFDN.
 
@@ -779,16 +954,23 @@ class PlaneWaveDFDN:
 
         # Build gains
         b = self._build_input_gains(source_azimuth, source_elevation)
+        b = b * float(reverb_gain)
         c = self._build_output_gains()  # (Q, NQ)
-        d = self._build_direct_gain(source_azimuth, source_elevation)  # ((L+1)², 1)
-        E = self._encoding_matrix  # ((L+1)², Q)
+        d = self._build_direct_gain(source_azimuth, source_elevation)  # ((L_out+1)², 1)
+        d = d * float(direct_gain)
+        E = self._encoding_matrix  # ((L_out+1)², Q)
         A = self._kronecker_matrix  # (NQ, NQ)
 
-        # Pre-compute early-reflection buffer in Ambisonics domain
+        # Pre-compute early-reflection signal in the plane-wave grid
+        # domain.  ERs are added to ``grid_output`` just before the
+        # Ambisonics encoder E, so they share E's gain convention with
+        # the late reverb but preserve their exact arrival times
+        # (injecting them into the delay-line input would delay them by
+        # one full delay-line length).
         has_er = self._early_reflections is not None
-        er_buffer = None
+        er_grid = None
         if has_er:
-            er_buffer = self._build_er_buffer(input_data, ir_len)
+            er_grid = self._build_er_grid_signal(input_data, ir_len, er_gain)
 
         # Allocate
         output_ambi = np.zeros((self.num_outputs, ir_len))
@@ -796,12 +978,19 @@ class PlaneWaveDFDN:
         dl_out = np.zeros((NQ, F))
 
         sample = 0
+        lam_s = self._lambda_group * Q
+        lam_e = lam_s + Q
         while sample + F <= ir_len:
             idx = slice(sample, sample + F)
             x = input_data[:, idx]
 
-            # Input mixing + feedback → delay lines (Eq. 12)
+            # Input mixing + feedback → delay lines (Eq. 12).  ERs are
+            # also re-injected into delay-line group λ so their energy
+            # feeds the late reverb (Eq. 12, s'(n) term), in addition to
+            # being tapped out directly at the grid stage (Eq. 11).
             dl_in = b @ x + fb_out
+            if has_er:
+                dl_in[lam_s:lam_e] += er_grid[:, idx]
 
             # Read / write delay lines
             for i in range(NQ):
@@ -814,14 +1003,15 @@ class PlaneWaveDFDN:
             # Output: sum across groups in grid domain (Eq. 11 reverb part)
             grid_output = c @ absorbed  # (Q, F)
 
-            # Encode reverb to Ambisonics (Eq. 13) + direct path in SH domain
+            # Inject early reflections in the grid domain so they share
+            # the encoder E's gain convention with the late reverb.
+            if has_er:
+                grid_output = grid_output + er_grid[:, idx]
+
+            # Encode to Ambisonics (Eq. 13) + direct path in SH domain
             output_ambi[:, idx] += E @ grid_output + d @ x
 
-            # Add early reflections directly in Ambisonics domain
-            if has_er:
-                output_ambi[:, idx] += er_buffer[:, idx]
-
-            # Feedback path: A ⊗ H_Q
+            # Feedback path: A ⊗ M_Q
             fb_out = A @ absorbed
 
             sample += F
@@ -832,35 +1022,57 @@ class PlaneWaveDFDN:
     # Early reflections buffer
     # ==================================================================
 
-    def _build_er_buffer(
-        self, input_data: NDArray, ir_len: int,
+    def _build_er_grid_signal(
+        self, input_data: NDArray, ir_len: int, er_gain: float = 1.0,
     ) -> NDArray:
-        """Pre-compute the early-reflection signal in Ambisonics domain.
+        """Pre-compute the early-reflection signal on the plane-wave grid.
 
-        Each reflection is SH-encoded at its true direction and delayed
-        by its arrival time.  Scaled by ``1 / √N`` to match the
-        direct-path gain convention.
+        For each reflection, decomposes a plane wave from its direction
+        onto the Q-point grid using
+        ``w[q] = (4π/Q) · Y_grid(q) · Y(az,el)``,
+        the dual of the encoder ``E = Y_grid^T · √(4π/Q)``.  When this
+        grid signal later passes through ``E``, it reconstructs a true
+        plane wave in the SH output with amplitude equal to ``ref.gain``
+        (wall reflectivity × 1/r), matching the direct-path convention
+        ``d = Y(az_src, el_src) · direct_gain``.
 
-        Returns shape ((L+1)², ir_len) — Ambisonics ER signal added
-        directly to the output, bypassing the plane-wave grid.
+        Returns shape (Q, ir_len) — added to ``grid_output`` inside the
+        render loop.
         """
-        N = self.num_delay_line_groups
-        n_ambi = (self.sh_order + 1) ** 2
-        er_buf = np.zeros((n_ambi, ir_len))
+        er_buf = np.zeros((self.Q, ir_len))
 
         if self._early_reflections is None:
             return er_buf
 
-        for ref, sh_vec in zip(
-            self._early_reflections.reflections,
-            self._early_reflections.sh_vectors,
-        ):
+        # SH basis evaluated on the grid at output_sh_order (same order
+        # as E, since anything above L_out is annihilated by E anyway).
+        Y_grid = spatial.encode_directions(
+            self.grid_azimuths, self.grid_elevations, self.output_sh_order,
+        )  # (Q, (L_out+1)²)
+        # Calibrate the plane-wave decomposition so that (E @ w) == y_dir.
+        # With (4π/Q) Yᵀ Y = diag(1/(2l+1)) and E = Yᵀ √(4π/Q):
+        #     E @ w = √(Q/(4π)) · diag(1/(2l+1)) · (comp · y_dir)
+        # so we need ``comp[lm] = (2l+1) · √(4π/Q)``.
+        comp_factor = np.sqrt(4.0 * np.pi / self.Q)
+        comp = np.zeros((Y_grid.shape[1],))
+        idx_sh = 0
+        for l in range(self.output_sh_order + 1):
+            n = 2 * l + 1
+            comp[idx_sh:idx_sh + n] = (2 * l + 1) * comp_factor
+            idx_sh += n
+
+        for ref in self._early_reflections.reflections:
             l_r = ref.delay_samples
             if l_r >= ir_len:
                 continue
             end = ir_len - l_r
+            y_dir = spatial.encode_direction(
+                ref.azimuth, ref.elevation, self.output_sh_order,
+            )  # ((L_out+1)²,)
+            weights = Y_grid @ (comp * y_dir)  # (Q,)
             er_buf[:, l_r:l_r + end] += (
-                sh_vec[:, np.newaxis] / np.sqrt(N) * input_data[0:1, :end]
+                ref.gain * er_gain * weights[:, np.newaxis]
+                * input_data[0:1, :end]
             )
 
         return er_buf

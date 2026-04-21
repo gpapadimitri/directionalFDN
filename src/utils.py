@@ -284,85 +284,40 @@ def plot_edc(ir: NDArray, fs: float, title: str = "Energy Decay Curve",
     plt.show()
 
 
-def plot_frequency_response(ir: NDArray, fs: float, title: str = "Frequency Response", smooth: float = 1/3) -> None:
-    """Plot the frequency response of an impulse response.
+def plot_frequency_response(x, fs, title="Frequency Response",
+                            smooth=None):
+    """
+    Plot the frequency response of a signal using pyfar.plot.freq.
 
     Parameters
     ----------
-    ir : NDArray
-        Single-channel impulse response.
-    fs : float
-        Sample rate in Hz.
-    title : str
-        Plot title.
-    smooth : float
-        Fractional-octave smoothing width (e.g. 1/3 for third-octave).
-        Set to 0 to disable smoothing.
+    x : array_like
+        The impulse response signal.
+    fs : int or float
+        The sampling frequency of the signal in Hz.
+    title : str, optional
+        The title for the frequency response plot.
+    smooth : int or None, optional
+        Apply octave smoothing: 1 for octave, 3 for 1/3 octave, None for no smoothing.
     """
-    freqs = rfftfreq(len(ir), 1 / fs)
-    mag = np.abs(rfft(ir))
+    sig = pf.Signal(np.asarray(x, dtype=np.float64), int(fs))
+    fig, ax = plt.subplots(figsize=(10, 6))
 
-    if smooth > 0 and len(freqs) > 1:
-        mag_smooth = np.copy(mag)
-        half = smooth / 2.0
-        for i in range(1, len(freqs)):
-            fc = freqs[i]
-            f_lo = fc * 2.0 ** (-half)
-            f_hi = fc * 2.0 ** (half)
-            mask = (freqs >= f_lo) & (freqs <= f_hi)
-            if np.any(mask):
-                mag_smooth[i] = np.mean(mag[mask])
-        mag = mag_smooth
+    if smooth is not None:
+        # Plot raw with transparency
+        pf.plot.freq(sig, ax=ax, alpha=0.3, color='gray', label='Raw')
+        # Apply smoothing (newer pyfar returns (smoothed, mask) tuple)
+        result = pf.dsp.smooth_fractional_octave(sig, smooth)
+        smoothed_sig = result[0] if isinstance(result, tuple) else result
+        pf.plot.freq(smoothed_sig, ax=ax, label=f'1/{smooth} Octave Smoothed')
+        ax.legend(loc='best')
+    else:
+        pf.plot.freq(sig, ax=ax)
 
-    fig, ax = plt.subplots(figsize=(7, 4))
-    ax.plot(freqs[1:], db(mag[1:]), color="blue")
-    ax.set_xscale("log")
-    ax.set_xlim(left=20, right=fs / 2)
-    ax.set_xticks([50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000])
-    ax.get_xaxis().set_major_formatter(plt.ScalarFormatter())
-    ax.set_xlabel("Frequency (Hz)")
-    ax.set_ylabel("Magnitude (dB)")
+    ax.set_xlim([20, 20000])
+    ax.relim()
+    ax.autoscale(axis='y')
     ax.set_title(title)
-    ax.grid(alpha=0.3, which="both")
     plt.tight_layout()
     plt.show()
 
-# def plot_frequency_response(x, fs, title="Frequency Response"):
-#     """
-#     Plot the frequency response and time-domain impulse response of a signal.
-
-#     Parameters
-#     ----------
-#     x : array_like
-#         The impulse response signal.
-#     fs : int or float
-#         The sampling frequency of the signal in Hz.
-#     title : str, optional
-#         The title for the frequency response plot (default is "Frequency Response").
-
-#     Returns
-#     -------
-#     None
-#         This function displays the plots and does not return any value.
-#     """
-
-#     Nfft = 2 ** int(np.ceil(np.log2(len(x))))
-#     IR_fft = np.fft.rfft(x, n=Nfft)
-#     freqs = np.fft.rfftfreq(Nfft, 1/fs)
-
-#     mag_db = 20 * np.log10(np.abs(IR_fft) / np.max(np.abs(IR_fft)) + 1e-12)
-
-#     plt.figure(figsize=(10, 4))
-#     plt.semilogx(freqs, mag_db, linewidth=0.3)
-#     plt.xlabel('Frequency (Hz)')
-#     plt.ylabel('Magnitude (dB)')
-#     plt.title(title)
-    
-#     # Set x-axis ticks and labels
-#     xtick_positions = [50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000]
-#     xtick_labels = ['50', '100', '200', '500', '1k', '2k', '5k', '10k', '20k']
-#     plt.xticks(xtick_positions, xtick_labels)
-#     plt.xlim([50, 20000])
-    
-#     plt.grid(True, which="both", ls="--", alpha=0.7)
-#     plt.show()

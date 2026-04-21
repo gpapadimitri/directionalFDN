@@ -11,14 +11,22 @@ from ..utils import ms_to_samps
 # Delay-line lengths
 # ---------------------------------------------------------------------------
 
-def generate_coprime_delay_lengths(
+def generate_distinct_delay_lengths(
     delay_range_ms: tuple[float, float],
     num_delay_lines: int,
     fs: float,
     *,
     rng: np.random.Generator | None = None,
 ) -> NDArray:
-    """Return *num_delay_lines* coprime prime-number delay lengths.
+    """Return *num_delay_lines* distinct integer delay lengths (primes preferred).
+
+    Strict pairwise coprimality is impractical when ``num_delay_lines`` is
+    large (e.g. NQ \u2273 200) because the prime count in any usable audio range
+    is much smaller.  This helper therefore returns *distinct* lengths,
+    prioritising primes within the requested range and filling the
+    remainder with distinct composites.  Distinct, well-spread lengths are
+    the standard FDN choice in this regime; modal/echo density depends on
+    the *spread* of the lengths, not on strict coprimality.
 
     Parameters
     ----------
@@ -48,15 +56,52 @@ def generate_coprime_delay_lengths(
         if sieve[i]:
             sieve[i * i :: i] = False
     primes = np.nonzero(sieve)[0]
-    primes = primes[(primes >= lo) & (primes <= hi)]
+    primes_in_range = primes[(primes >= lo) & (primes <= hi)]
 
-    if len(primes) < num_delay_lines:
+    if len(primes_in_range) >= num_delay_lines:
+        rng.shuffle(primes_in_range)
+        return primes_in_range[:num_delay_lines].astype(np.int64)
+
+    # Not enough primes — fall back to distinct integer lengths in [lo, hi],
+    # prioritizing primes. Strict pairwise coprimality is impractical for
+    # large delay-line counts; distinct, spread lengths are the standard
+    # FDN choice in this regime.
+    all_lengths = np.arange(lo, hi + 1, dtype=np.int64)
+    if len(all_lengths) < num_delay_lines:
         raise ValueError(
-            f"Not enough primes in [{lo}, {hi}] for {num_delay_lines} delay lines."
+            f"Range [{lo}, {hi}] contains only {len(all_lengths)} integers, "
+            f"need {num_delay_lines}. Widen delay_range_ms."
         )
 
-    rng.shuffle(primes)
-    return primes[:num_delay_lines].astype(np.int64)
+    is_prime = np.zeros(len(all_lengths), dtype=bool)
+    is_prime[np.isin(all_lengths, primes_in_range)] = True
+
+    primes_arr = all_lengths[is_prime].copy()
+    composites = all_lengths[~is_prime].copy()
+    rng.shuffle(primes_arr)
+    rng.shuffle(composites)
+
+    needed = num_delay_lines - len(primes_arr)
+    selected = np.concatenate([primes_arr, composites[:needed]])
+    rng.shuffle(selected)
+    return selected.astype(np.int64)
+
+
+def generate_coprime_delay_lengths(*args, **kwargs):  # pragma: no cover
+    """Deprecated alias of :func:`generate_distinct_delay_lengths`.
+
+    The previous name was misleading because strict pairwise coprimality
+    is not enforced for large delay-line counts.
+    """
+    import warnings
+
+    warnings.warn(
+        "generate_coprime_delay_lengths is deprecated; use "
+        "generate_distinct_delay_lengths instead.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    return generate_distinct_delay_lengths(*args, **kwargs)
 
 
 # ---------------------------------------------------------------------------
