@@ -32,7 +32,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from . import spatial
-from .delay_line import generate_coprime_delay_lengths
+from .delay_line import generate_distinct_delay_lengths
 from .fdn import FDN
 from .feedback_matrix import FeedbackMatrix, FeedbackMatrixType
 from .transform import DirectionalWeighting
@@ -139,7 +139,7 @@ class DirectionalFDN(FDN):
         # 1. Delay-line lengths
         if rng is None and self.seed is not None:
             rng = np.random.default_rng(self.seed)
-        group_lengths = generate_coprime_delay_lengths(
+        group_lengths = generate_distinct_delay_lengths(
             delay_range_ms, N, self.sample_rate, rng=rng
         )
         # Replicate for all Q channels per group
