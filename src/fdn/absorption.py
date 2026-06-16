@@ -85,8 +85,13 @@ class AbsorptionGains(Absorption):
             num_delay_lines, delay_line_lengths, sample_rate, frame_size, des_t60_ms
         )
         t60_s = float(des_t60_ms) * 1e-3
+        #a round trip is m+frame_size samples, not m, since block
+        #processing reinjects feedback one block after producing it.
+        #without this term the realised t60 runs long by ~(1+frame_size/m).
         self._gains: NDArray = db2lin(
-            -60.0 * self.delay_line_lengths / (self.sample_rate * t60_s)
+            -60.0
+            * (self.delay_line_lengths + self.frame_size)
+            / (self.sample_rate * t60_s)
         )
 
     def process(self, x: NDArray) -> NDArray:
@@ -151,10 +156,16 @@ class AbsorptionFilters(Absorption):
             air_atten_db = air_absorption_db_per_meter(self.freqs)
 
         for i in range(self.num_delay_lines):
-            # Target gain spectrum per delay line
+            #target gain spectrum per delay line. frame_size accounts for
+            #the one-block feedback latency, ceil(order/2) for the filter
+            #group delay, so the round trip is sized correctly
             target_gains = db2lin(
                 -60.0
-                * (self.delay_line_lengths[i] + int(np.ceil(self.filter_order / 2)))
+                * (
+                    self.delay_line_lengths[i]
+                    + self.frame_size
+                    + int(np.ceil(self.filter_order / 2))
+                )
                 / (self.sample_rate * np.asarray(self.des_t60_ms) * 1e-3)
             )
             if air_atten_db is not None:

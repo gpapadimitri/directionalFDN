@@ -402,8 +402,13 @@ class DirectionalAbsorptionFilters:
             # Shape (N_total,) — broadband scalar per channel
             self._use_filters = False
             t60_s = np.maximum(t60, 1.0) * 1e-3
+            #round trip is m+frame_size, not m, since block processing
+            #reinjects feedback one block late. without it the realised
+            #t60 runs long by ~(1+frame_size/m)
             self._gains = db2lin(
-                -60.0 * self.delay_lengths / (self.sample_rate * t60_s)
+                -60.0
+                * (self.delay_lengths + self.frame_size)
+                / (self.sample_rate * t60_s)
             )
         elif t60.ndim == 2 and t60.shape[0] == total_delay_lines:
             # Shape (N_total, n_bands) — frequency-dependent per channel
@@ -431,9 +436,12 @@ class DirectionalAbsorptionFilters:
         for i in range(self.N_total):
             # Eq. 6-8: target gain spectrum for this channel
             t60_s = np.maximum(t60_ms[i], 1.0) * 1e-3
-            # Compensate for filter group delay (ceil(order/2))
+            #frame_size for the one-block feedback latency, ceil(order/2)
+            #for the filter group delay, so the round trip is sized right
             effective_len = (
-                self.delay_lengths[i] + int(np.ceil(self.filter_order / 2))
+                self.delay_lengths[i]
+                + self.frame_size
+                + int(np.ceil(self.filter_order / 2))
             )
             target_gains = db2lin(
                 -60.0 * effective_len / (self.sample_rate * t60_s)
