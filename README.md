@@ -1,6 +1,6 @@
 # directional_fdn — Directional Feedback Delay Network
 
-Directional Feedback Delay Network (DFDN) for Ambisonics room impulse response synthesis.
+Directional Feedback Delay Network (DFDN) for Ambisonic room impulse response synthesis.
 Motivated from the following publications:
 
     - B. Alary, A. Politis, S. Schlecht, and V. Välimäki, "Directional Feedback Delay Network," Journal of the Audio Engineering Society, vol. 67, no. 10, pp. 752–762, 2019.
