@@ -1,11 +1,13 @@
 __pycache__/
 *.pyc
 *.egg-info/
-dfdn_env/
 .pytest_cache/
 dist/
 build/
 *.so
+
+examples/
+tests/
 
 # Papers
 papers/
