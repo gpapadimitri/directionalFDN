@@ -85,8 +85,9 @@ def render_fdn(
         d,
         post_delay=absorption,
     )
-    y = np.asarray(y, dtype=float)
-    # process_fdn squeezes its output; restore the channel axis.
-    if y.ndim == 1:
-        y = y[:, np.newaxis]
-    return y.T
+    # process_fdn returns output.squeeze(), which strips every singleton axis
+    # of its (n_samples, n_out) result -- so neither ndim nor shape identifies
+    # which axis was dropped. Reshape from the dimensions already known here
+    # instead of inferring them from what survived.
+    n_out = np.asarray(c).shape[0]
+    return np.asarray(y, dtype=float).reshape(x.shape[1], n_out).T

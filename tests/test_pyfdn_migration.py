@@ -217,3 +217,19 @@ class TestRenderAdapter:
         y = render_fdn(x, delays, np.zeros((2, 2)), b, c, np.zeros((1, 1)),
                        absorption=ScalarGains(np.ones(2)))
         assert np.argmax(np.abs(y[0])) == 1039
+
+    def test_single_sample_render_keeps_both_axes(self):
+        """process_fdn squeezes every singleton axis; the adapter must not guess."""
+        from src.fdn.render import ScalarGains, render_fdn
+
+        delays = np.array([5, 7, 11])
+        x = np.ones((1, 1))
+        gains = ScalarGains(np.ones(3))
+
+        multi = render_fdn(x, delays, np.eye(3), np.ones((3, 1)), np.eye(3),
+                           np.zeros((3, 1)), absorption=gains)
+        assert multi.shape == (3, 1)
+
+        single = render_fdn(x, delays, np.eye(3), np.ones((3, 1)),
+                            np.ones((1, 3)), np.zeros((1, 1)), absorption=gains)
+        assert single.shape == (1, 1)
