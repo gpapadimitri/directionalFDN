@@ -147,3 +147,73 @@ class TestAbsorptionGEQ:
 
         absorber = create_absorption(4, self.DELAYS, 48000.0, 64, 500.0)
         assert isinstance(absorber, AbsorptionGains)
+
+
+class TestRenderAdapter:
+    def test_orientation_single_output(self):
+        from src.fdn.render import ScalarGains, render_fdn
+
+        delays = np.array([1039, 1213, 1381, 1523])
+        A = np.linalg.qr(np.random.default_rng(0).standard_normal((4, 4)))[0]
+        b = np.ones((4, 1)) / 2.0
+        c = np.ones((1, 4)) / 2.0
+        x = np.zeros((1, 4096))
+        x[0, 0] = 1.0
+        y = render_fdn(x, delays, A, b, c, np.zeros((1, 1)),
+                       absorption=ScalarGains(np.full(4, 0.99)))
+        assert y.shape == (1, 4096)
+
+    def test_orientation_multi_output(self):
+        from src.fdn.render import ScalarGains, render_fdn
+
+        delays = np.array([1039, 1213, 1381, 1523])
+        A = np.eye(4)
+        b = np.ones((4, 1)) / 2.0
+        c = np.eye(4)
+        x = np.zeros((1, 4096))
+        x[0, 0] = 1.0
+        y = render_fdn(x, delays, A, b, c, np.zeros((4, 1)),
+                       absorption=ScalarGains(np.full(4, 0.99)))
+        assert y.shape == (4, 4096)
+
+    def test_direct_path_passes_through(self):
+        from src.fdn.render import ScalarGains, render_fdn
+
+        delays = np.array([1039, 1213, 1381, 1523])
+        x = np.zeros((1, 2048))
+        x[0, 0] = 1.0
+        y = render_fdn(x, delays, np.eye(4), np.zeros((4, 1)), np.zeros((1, 4)),
+                       np.array([[0.5]]), absorption=ScalarGains(np.full(4, 0.99)))
+        assert y[0, 0] == pytest.approx(0.5)
+        assert np.allclose(y[0, 1:], 0.0)
+
+    def test_round_trip_is_exactly_m_samples(self, measured_t60):
+        """The defining property: no frame_size compensation needed."""
+        from src.fdn.render import ScalarGains, render_fdn
+
+        fs = 48000.0
+        target_t60 = 1.5
+        delays = np.array([1039, 1213, 1381, 1523, 1699, 1877, 2039, 2213])
+        gains = 10.0 ** (-3.0 * delays / (fs * target_t60))
+        A = np.linalg.qr(np.random.default_rng(0).standard_normal((8, 8)))[0]
+        x = np.zeros((1, int(4 * fs)))
+        x[0, 0] = 1.0
+        y = render_fdn(x, delays, A, np.ones((8, 1)) / np.sqrt(8),
+                       np.ones((1, 8)) / np.sqrt(8), np.zeros((1, 1)),
+                       absorption=ScalarGains(gains))
+
+        rt = measured_t60(y[0], fs)
+        # 62 Hz band is noisy on a 4 s IR; check 125 Hz upward.
+        np.testing.assert_allclose(rt[1:], target_t60, rtol=0.03)
+
+    def test_impulse_arrives_at_the_delay_length(self):
+        from src.fdn.render import ScalarGains, render_fdn
+
+        delays = np.array([1039, 1213])
+        b = np.array([[1.0], [0.0]])
+        c = np.array([[1.0, 0.0]])
+        x = np.zeros((1, 4096))
+        x[0, 0] = 1.0
+        y = render_fdn(x, delays, np.zeros((2, 2)), b, c, np.zeros((1, 1)),
+                       absorption=ScalarGains(np.ones(2)))
+        assert np.argmax(np.abs(y[0])) == 1039
