@@ -6,6 +6,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from ..utils import ms_to_samps
+from pyFDN import sample_delay_lengths
 
 # ---------------------------------------------------------------------------
 # Delay-line lengths
@@ -102,6 +103,64 @@ def generate_coprime_delay_lengths(*args, **kwargs):  # pragma: no cover
         stacklevel=2,
     )
     return generate_distinct_delay_lengths(*args, **kwargs)
+
+
+def generate_delay_lengths(
+    delay_range_ms: tuple[float, float],
+    num_delay_lines: int,
+    fs: float,
+    *,
+    distribution: str = "geometric",
+    rng: np.random.Generator | int | None = None,
+) -> NDArray:
+    """Return *num_delay_lines* distinct delay lengths in samples.
+
+    Draws from ``pyFDN.sample_delay_lengths`` with pairwise-coprime snapping,
+    which is the classic FDN choice for avoiding coinciding echoes.  Coprimality
+    is only achievable while the requested range holds enough mutually coprime
+    integers; at high channel counts (e.g. ``PlaneWaveDFDN`` with N*Q >= 300 in a
+    20-60 ms range) the snapping pushes values far outside the range, so this
+    falls back to :func:`generate_distinct_delay_lengths`, which guarantees
+    distinctness within the range but not coprimality.
+
+    Parameters
+    ----------
+    delay_range_ms : (float, float)
+        Min and max delay in milliseconds.
+    num_delay_lines : int
+        Number of delay lines.
+    fs : float
+        Sample rate in Hz.
+    distribution : str
+        ``"geometric"`` (log-uniform, default), ``"uniform"`` or ``"lognormal"``.
+    rng : numpy.random.Generator or int, optional
+        Generator or integer seed.
+
+    Returns
+    -------
+    NDArray of int64
+        Delay-line lengths in samples.
+    """
+    lo, hi = (int(v) for v in ms_to_samps(np.asarray(delay_range_ms, dtype=float), fs))
+
+    candidate = sample_delay_lengths(
+        num_delay_lines,
+        (lo, hi),
+        distribution=distribution,
+        coprime=True,
+        rng=rng,
+    ).astype(np.int64)
+
+    in_range = bool(np.all((candidate >= lo) & (candidate <= hi)))
+    distinct = len(np.unique(candidate)) == num_delay_lines
+    if in_range and distinct:
+        return candidate
+
+    # Coprimality is infeasible in this range at this channel count.
+    generator = rng if isinstance(rng, np.random.Generator) else np.random.default_rng(rng)
+    return generate_distinct_delay_lengths(
+        delay_range_ms, num_delay_lines, fs, rng=generator
+    )
 
 
 # ---------------------------------------------------------------------------
