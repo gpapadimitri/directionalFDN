@@ -93,3 +93,57 @@ class TestAbsorptionDesign:
         t60 = np.vstack([self.T60_S, self.T60_S])  # 2 rows for 4 delays
         with pytest.raises(ValueError, match="one T60 curve per delay line"):
             design_absorption_sos(t60, self.FREQS, self.DELAYS, 48000.0)
+
+
+class TestAbsorptionGEQ:
+    FREQS = np.array([63.0, 125, 250, 500, 1000, 2000, 4000, 8000])
+    T60_MS = np.array([1.8, 1.7, 1.6, 1.4, 1.2, 1.0, 0.7, 0.45]) * 1e3
+    DELAYS = np.array([1039, 1213, 1381, 1523])
+
+    def _make(self):
+        from src.fdn.absorption import AbsorptionGEQ
+
+        return AbsorptionGEQ(4, self.DELAYS, 48000.0, 64, self.T60_MS, self.FREQS)
+
+    def test_shape_preserved(self):
+        absorber = self._make()
+        x = np.ones((4, 64))
+        y = absorber.process(x)
+        assert y.shape == x.shape
+
+    def test_attenuates(self):
+        absorber = self._make()
+        x = np.ones((4, 512))
+        y = absorber.process(x)
+        assert np.sum(y**2) < np.sum(x**2)
+
+    def test_state_persists_across_blocks(self):
+        """Two 64-sample blocks must equal one 128-sample block."""
+        a = self._make()
+        b = self._make()
+        x = np.random.default_rng(0).standard_normal((4, 128))
+        one_shot = b.process(x)
+        chunked = np.concatenate([a.process(x[:, :64]), a.process(x[:, 64:])], axis=1)
+        np.testing.assert_allclose(chunked, one_shot, atol=1e-12)
+
+    def test_reset_clears_state(self):
+        absorber = self._make()
+        x = np.random.default_rng(0).standard_normal((4, 128))
+        first = absorber.process(x)
+        absorber.reset()
+        second = absorber.process(x)
+        np.testing.assert_allclose(first, second, atol=1e-12)
+
+    def test_factory_returns_geq_by_default(self):
+        from src.fdn.absorption import AbsorptionGEQ, create_absorption
+
+        absorber = create_absorption(
+            4, self.DELAYS, 48000.0, 64, self.T60_MS, freqs=self.FREQS
+        )
+        assert isinstance(absorber, AbsorptionGEQ)
+
+    def test_factory_scalar_still_returns_gains(self):
+        from src.fdn.absorption import AbsorptionGains, create_absorption
+
+        absorber = create_absorption(4, self.DELAYS, 48000.0, 64, 500.0)
+        assert isinstance(absorber, AbsorptionGains)

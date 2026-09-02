@@ -14,8 +14,10 @@ from abc import ABC, abstractmethod
 import numpy as np
 from numpy.typing import NDArray
 from scipy.signal import lfilter, sosfilt, tf2zpk
+from pyFDN import SOSFilterBank
 
 from ..utils import db2lin
+from .absorption_design import design_absorption_sos
 from .filter_fitting import (
     interpolate_magnitude_spectrum,
     prony_warped,
@@ -264,6 +266,60 @@ class AbsorptionSOS(Absorption):
 
 
 # ---------------------------------------------------------------------------
+# Graphic-EQ absorption (Schlecht and Habets, DAFx 2017)
+# ---------------------------------------------------------------------------
+
+class AbsorptionGEQ(Absorption):
+    """Per-delay-line graphic-EQ absorption for frequency-dependent T60.
+
+    Replaces the warped-Prony IIR fit of :class:`AbsorptionFilters` with an
+    11-section SOS cascade designed by constrained least squares.  Being SOS,
+    it is stable by construction, so no pole nudging is needed.
+
+    The round trip is taken as ``m_i`` samples exactly.  It carries no
+    ``frame_size`` correction because it is built for the corrected recursion
+    in :mod:`src.fdn.render`, where the feedback re-enters the delay line in
+    the same block it was read from.
+
+    Parameters
+    ----------
+    des_t60_ms : NDArray
+        Shape ``(n_bands,)`` shared across delay lines, or ``(N, n_bands)``
+        per delay line.  Milliseconds.
+    freqs : NDArray, shape (n_bands,)
+        Frequencies in Hz at which *des_t60_ms* is specified.
+    """
+
+    def __init__(
+        self,
+        num_delay_lines: int,
+        delay_line_lengths: NDArray,
+        sample_rate: float,
+        frame_size: int,
+        des_t60_ms: NDArray,
+        freqs: NDArray,
+    ) -> None:
+        super().__init__(
+            num_delay_lines, delay_line_lengths, sample_rate, frame_size, des_t60_ms
+        )
+        self.freqs = np.asarray(freqs, dtype=float)
+        self.sos = design_absorption_sos(
+            np.asarray(des_t60_ms, dtype=float) * 1e-3,
+            self.freqs,
+            self.delay_line_lengths,
+            sample_rate,
+        )
+        self._bank = SOSFilterBank(self.sos, num_delay_lines)
+
+    def process(self, x: NDArray) -> NDArray:
+        # SOSFilterBank is samples-first; this ABC is channels-first.
+        return self._bank.filter(np.asarray(x).T).T
+
+    def reset(self) -> None:
+        self._bank = SOSFilterBank(self.sos, self.num_delay_lines)
+
+
+# ---------------------------------------------------------------------------
 # Factory
 # ---------------------------------------------------------------------------
 
@@ -277,29 +333,46 @@ def create_absorption(
     freqs: NDArray | None = None,
     filter_order: int | None = None,
     warp_factor: float | None = None,
+    method: str = "geq",
 ) -> Absorption:
     """Convenience factory that picks the right absorption type.
 
-    * Scalar *des_t60_ms* → :class:`AbsorptionGains`
-    * Array  *des_t60_ms* (with *freqs*, *filter_order*, *warp_factor*)
-      → :class:`AbsorptionFilters`
+    * Scalar *des_t60_ms* -> :class:`AbsorptionGains`
+    * Array *des_t60_ms* with *freqs* -> :class:`AbsorptionGEQ` (default)
+    * ``method="prony"`` -> legacy :class:`AbsorptionFilters`, which also
+      needs *filter_order* and *warp_factor*
+
+    ``filter_order`` and ``warp_factor`` are accepted and ignored by the GEQ
+    path so that existing call sites keep working unchanged.
     """
     if isinstance(des_t60_ms, np.ndarray) and des_t60_ms.ndim > 0:
-        if freqs is None or filter_order is None or warp_factor is None:
-            raise ValueError(
-                "freqs, filter_order, and warp_factor are required "
-                "for frequency-dependent T60."
+        if freqs is None:
+            raise ValueError("freqs is required for frequency-dependent T60.")
+        if method == "geq":
+            return AbsorptionGEQ(
+                num_delay_lines,
+                delay_line_lengths,
+                sample_rate,
+                frame_size,
+                des_t60_ms,
+                freqs,
             )
-        return AbsorptionFilters(
-            num_delay_lines,
-            delay_line_lengths,
-            sample_rate,
-            frame_size,
-            des_t60_ms,
-            freqs,
-            filter_order,
-            warp_factor,
-        )
+        if method == "prony":
+            if filter_order is None or warp_factor is None:
+                raise ValueError(
+                    "filter_order and warp_factor are required for method='prony'."
+                )
+            return AbsorptionFilters(
+                num_delay_lines,
+                delay_line_lengths,
+                sample_rate,
+                frame_size,
+                des_t60_ms,
+                freqs,
+                filter_order,
+                warp_factor,
+            )
+        raise ValueError(f"Unknown absorption method {method!r}; use 'geq' or 'prony'.")
     return AbsorptionGains(
         num_delay_lines, delay_line_lengths, sample_rate, frame_size, des_t60_ms
     )
