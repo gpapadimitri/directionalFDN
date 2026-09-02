@@ -291,9 +291,27 @@ class TestFDNCorrectedLoop:
         # 62 Hz and 8 kHz bands sit at the edge of the design grid; check the middle.
         np.testing.assert_allclose(rt[1:6], target[1:6], rtol=0.10)
 
-    def test_reset_clears_state(self):
+    def test_silence_in_gives_silence_out(self):
+        """Zero input produces zero output; reset() is incidental here."""
         fdn = self._make(1500.0)
         fdn.process(self._impulse(0.5))
         fdn.reset()
         out = fdn.process(np.zeros((1, 4096)))
         assert np.max(np.abs(out)) < 1e-12
+
+    def test_reset_clears_absorption_filter_state(self):
+        """reset() must clear the SOS memory that persists between process() calls."""
+        freqs = np.array([63.0, 125, 250, 500, 1000, 2000, 4000, 8000])
+        t60_ms = np.array([1.8, 1.7, 1.6, 1.4, 1.2, 1.0, 0.7, 0.45]) * 1e3
+        fdn = self._make(t60_ms, freqs=freqs)
+        x = self._impulse(0.2)
+
+        first = fdn.process(x)
+        without_reset = fdn.process(x)
+        fdn.reset()
+        after_reset = fdn.process(x)
+
+        # Absorption filter memory carries into the second call...
+        assert not np.allclose(first, without_reset, atol=1e-12)
+        # ...and reset() puts it back to the initial state.
+        np.testing.assert_allclose(first, after_reset, atol=1e-12)
