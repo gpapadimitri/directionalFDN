@@ -537,29 +537,18 @@ class TestAnalysisHelpers:
         assert rt.shape == fc.shape
         np.testing.assert_allclose(rt[1:-1], 1.2, rtol=0.10)
 
-    def test_mixing_time_is_positive(self):
+    def test_mixing_time_of_diffuse_noise_is_finite(self):
         from src.utils import mixing_time_ms
 
-        assert mixing_time_ms(self._synthetic_ir(), self.FS) >= 0.0
+        t_mix = mixing_time_ms(self._synthetic_ir(), self.FS)
+        assert np.isfinite(t_mix)
+        assert t_mix >= 0.0
 
-    def test_mixing_time_shorter_for_denser_ir(self):
-        """White noise is fully diffuse immediately; a sparse train is not."""
+    def test_sparse_response_never_reaches_the_threshold(self):
+        """A pulse train is not diffuse; the wrapper must say so, not say 0."""
         from src.utils import mixing_time_ms
 
         dense = self._synthetic_ir()
         sparse = np.zeros_like(dense)
         sparse[::400] = dense[::400] * 20.0
-        assert mixing_time_ms(dense, self.FS) <= mixing_time_ms(sparse, self.FS)
-
-    def test_pole_bounds_below_unity_for_a_decaying_fdn(self):
-        from src.fdn.absorption_design import design_absorption_sos
-        from src.utils import pole_bounds
-
-        delays = np.array([1039, 1213, 1381, 1523])
-        freqs = np.array([63.0, 125, 250, 500, 1000, 2000, 4000, 8000])
-        t60 = np.array([1.8, 1.7, 1.6, 1.4, 1.2, 1.0, 0.7, 0.45])
-        sos = design_absorption_sos(t60, freqs, delays, self.FS)
-        A = np.linalg.qr(np.random.default_rng(0).standard_normal((4, 4)))[0]
-        _, max_curve, f = pole_bounds(delays, sos, A, self.FS)
-        assert np.all(max_curve < 1.0)
-        assert f[0] == pytest.approx(0.0)
+        assert np.isnan(mixing_time_ms(sparse, self.FS))

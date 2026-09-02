@@ -9,7 +9,6 @@ import pyfar as pf
 from pyrato.edc import energy_decay_curve_chu_lundeby, schroeder_integration
 from pyrato.parameters import reverberation_time_linear_regression
 import pyFDN
-from scipy.signal import sosfreqz
 
 
 def db(x: NDArray | float, is_squared: bool = False) -> NDArray:
@@ -287,71 +286,19 @@ def mixing_time_ms(ir: NDArray, fs: float, pre_delay: int = 0) -> float:
     Returns
     -------
     float
-        Mixing time in ms, or 0.0 if the threshold is never crossed.
+        Mixing time in ms, or ``nan`` if the response never reaches the
+        threshold.  ``pyFDN.echo_density`` reports that case as 0.0, which
+        would read as "instantly mixed"; nan is the honest value for
+        "undefined" and keeps comparisons from silently inverting.
     """
-    t_abel, _ = pyFDN.echo_density(
-        np.asarray(ir).ravel(), n=1024, fs=fs, pre_delay=pre_delay
-    )
+    import warnings
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        t_abel, _ = pyFDN.echo_density(
+            np.asarray(ir).ravel(), n=1024, fs=fs, pre_delay=pre_delay
+        )
+    if any("Mixing time not found" in str(w.message) for w in caught):
+        return float("nan")
     return float(t_abel)
-
-
-def pole_bounds(
-    delays: NDArray, sos: NDArray, feedback_matrix: NDArray, fs: float,
-    nfft: int = 2**12,
-) -> tuple[NDArray, NDArray, NDArray]:
-    """Upper and lower bounds on the FDN loop pole magnitudes vs frequency.
-
-    A stable, correctly-absorbing FDN keeps the upper curve below 1 at every
-    frequency.  Useful as a design check on the directional absorption, where
-    each direction has its own filter and the usual single-channel intuition
-    does not apply.
-
-    Parameters
-    ----------
-    delays : NDArray, shape (N,)
-        Delay-line lengths in samples.
-    sos : NDArray, shape (n_sections, 6, N)
-        Per-channel absorption SOS bank, as returned by
-        :func:`src.fdn.absorption_design.design_absorption_sos`.
-    feedback_matrix : NDArray, shape (N, N)
-        Scalar feedback matrix.
-    fs : float
-        Sample rate in Hz.
-    nfft : int
-        Number of frequency points.
-
-    Returns
-    -------
-    min_curve, max_curve : NDArray, shape (nfft,)
-        Lower and upper pole-magnitude bounds.
-    freqs : NDArray, shape (nfft,)
-        Frequencies in Hz.
-    """
-    delays = np.asarray(delays, dtype=float).ravel()
-    num = delays.size
-
-    # pole_boundaries wants an object exposing per-channel (b, a) of shape
-    # (N, 1, len); convert each SOS cascade to a single transfer function.
-    from scipy.signal import sos2tf
-
-    b_list, a_list = [], []
-    for i in range(num):
-        b_i, a_i = sos2tf(np.asarray(sos)[:, :, i])
-        b_list.append(b_i)
-        a_list.append(a_i)
-    order = max(max(len(v) for v in b_list), max(len(v) for v in a_list))
-    b_arr = np.zeros((num, 1, order))
-    a_arr = np.zeros((num, 1, order))
-    for i in range(num):
-        b_arr[i, 0, : len(b_list[i])] = b_list[i]
-        a_arr[i, 0, : len(a_list[i])] = a_list[i]
-
-    class _Absorption:
-        b = b_arr
-        a = a_arr
-
-    A3 = np.asarray(feedback_matrix, dtype=float)
-    if A3.ndim == 2:
-        A3 = A3[:, :, np.newaxis]
-    return pyFDN.pole_boundaries(delays, _Absorption(), A3, fs, nfft=nfft)
 
