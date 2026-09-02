@@ -236,14 +236,20 @@ class FDN:
     # ------------------------------------------------------------------
 
     def reset(self) -> None:
-        """Clear all internal state (delay lines, absorption, feedback)."""
+        """Clear internal state: delay-line buffers and absorption filters.
+
+        The feedback matrix is stateless, so there is nothing to reset there.
+        The delay-line loop is vestigial for ``process``, which allocates a
+        fresh delay bank per call through :func:`src.fdn.render.render_fdn`;
+        it is kept because ``init_delay_lines`` and ``_check_ready`` still
+        expose those buffers.  Clearing the absorption filters is the part
+        that changes subsequent output.
+        """
         if self.delay_lines is not None:
             for dl in self.delay_lines:
                 dl.reset()
         if self.absorption is not None:
             self.absorption.reset()
-        if self.feedback is not None:
-            self.feedback.reset()
 
     # ------------------------------------------------------------------
     # Internal

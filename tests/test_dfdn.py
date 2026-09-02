@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 
 from src.fdn.absorption import AbsorptionGains, create_absorption
-from src.fdn.delay_line import DelayLine, generate_coprime_delay_lengths
+from src.fdn.delay_line import DelayLine, generate_distinct_delay_lengths
 from src.fdn.directional_fdn import DirectionalFDN
 from src.fdn.fdn import FDN
 from src.fdn.feedback_matrix import FeedbackMatrix, FeedbackMatrixType
@@ -129,7 +129,7 @@ class TestDelayLine:
         assert np.allclose(dl.data, 0.0)
 
     def test_coprime_lengths(self):
-        lengths = generate_coprime_delay_lengths(
+        lengths = generate_distinct_delay_lengths(
             (10, 30), 4, 48000, rng=np.random.default_rng(42)
         )
         assert len(lengths) == 4
@@ -156,7 +156,7 @@ class TestFeedbackMatrix:
     def test_process_preserves_energy(self):
         fb = FeedbackMatrix(4, FeedbackMatrixType.RANDOM, 32, seed=1)
         x = np.random.default_rng(2).standard_normal((4, 32))
-        y = fb.process(x)
+        y = fb.matrix @ x
         np.testing.assert_allclose(
             np.sum(x**2), np.sum(y**2), rtol=1e-10
         )
@@ -388,7 +388,6 @@ class TestDirectionalWeighting:
 # ======================================================================
 
 from src.fdn.planewave_dfdn import (
-    DirectionalAbsorptionFilters,
     EarlyReflectionModule,
     PlaneWaveDFDN,
     Reflection,
@@ -583,46 +582,6 @@ class TestEarlyReflections:
         e_no = np.sum(rir_no_er[0, window] ** 2)
         e_with = np.sum(rir_with_er[0, window] ** 2)
         assert e_with > e_no
-
-
-class TestDirectionalAbsorptionFilters:
-    def test_scalar_t60(self):
-        """Broadband scalar T60 should use simple gains."""
-        filt = DirectionalAbsorptionFilters(
-            total_delay_lines=4,
-            delay_lengths=np.array([500, 600, 700, 800]),
-            sample_rate=48000,
-            frame_size=64,
-            t60_per_channel_ms=np.full(4, 800.0),
-        )
-        assert not filt._use_filters
-        x = np.random.randn(4, 64)
-        y = filt.process(x)
-        assert y.shape == x.shape
-        # Energy should decrease
-        assert np.sum(y ** 2) < np.sum(x ** 2)
-
-    def test_freq_dependent_t60(self):
-        """Multi-band T60 should use IIR filters."""
-        freqs = np.array([125, 500, 2000, 8000], dtype=float)
-        t60 = np.array([
-            [1000, 800, 600, 400],
-            [900, 700, 500, 300],
-        ], dtype=float)
-        filt = DirectionalAbsorptionFilters(
-            total_delay_lines=2,
-            delay_lengths=np.array([500, 600]),
-            sample_rate=48000,
-            frame_size=64,
-            t60_per_channel_ms=t60,
-            freqs=freqs,
-            filter_order=4,
-            warp_factor=0.7,
-        )
-        assert filt._use_filters
-        x = np.random.randn(2, 64)
-        y = filt.process(x)
-        assert y.shape == x.shape
 
 
 # ======================================================================

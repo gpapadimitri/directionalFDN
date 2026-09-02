@@ -88,22 +88,6 @@ def generate_distinct_delay_lengths(
     return selected.astype(np.int64)
 
 
-def generate_coprime_delay_lengths(*args, **kwargs):  # pragma: no cover
-    """Deprecated alias of :func:`generate_distinct_delay_lengths`.
-
-    The previous name was misleading because strict pairwise coprimality
-    is not enforced for large delay-line counts.
-    """
-    import warnings
-
-    warnings.warn(
-        "generate_coprime_delay_lengths is deprecated; use "
-        "generate_distinct_delay_lengths instead.",
-        DeprecationWarning,
-        stacklevel=2,
-    )
-    return generate_distinct_delay_lengths(*args, **kwargs)
-
 
 def generate_delay_lengths(
     delay_range_ms: tuple[float, float],

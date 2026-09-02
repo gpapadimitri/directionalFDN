@@ -131,8 +131,8 @@ class DirectionalFDN(FDN):
             Desired T60 (ms).  Scalar → homogeneous; array → frequency-dependent.
         feedback_type : FeedbackMatrixType
             Type of base N×N feedback matrix.
-        freqs, filter_order, warp_factor
-            Frequency-dependent absorption parameters (see :class:`AbsorptionFilters`).
+        freqs
+            Frequencies (Hz) for frequency-dependent absorption.
         rng : np.random.Generator, optional
             Random generator for delay-length selection.
         """
