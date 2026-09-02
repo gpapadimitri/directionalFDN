@@ -375,6 +375,14 @@ class DirectionalAbsorptionFilters:
         IIR filter order per channel.
     warp_factor : float
         All-pass warping coefficient.
+    air_absorption : bool
+        Account for atmospheric absorption *within* the target T60 budget
+        (ISO 9613-1).  The realised T60 is unchanged — enabling this does
+        not shorten the decay.  What it does is split the per-round-trip
+        attenuation into a medium share and a boundary share, exposed as
+        :attr:`air_attenuation_db` and :attr:`boundary_attenuation_db`,
+        and warn when the requested T60 is longer than air absorption
+        alone permits.  Requires frequency-dependent *t60_per_channel_ms*.
     """
 
     def __init__(
@@ -400,6 +408,17 @@ class DirectionalAbsorptionFilters:
         t60 = np.asarray(t60_per_channel_ms, dtype=float)
         if t60.ndim == 1:
             # Shape (N_total,) — broadband scalar per channel
+            if air_absorption:
+                import warnings
+
+                warnings.warn(
+                    "air_absorption is ignored for a broadband T60: the "
+                    "absorption coefficient is frequency-dependent, so the "
+                    "medium/boundary split cannot be evaluated. Pass a "
+                    "frequency-dependent T60 with freqs to use it.",
+                    RuntimeWarning,
+                    stacklevel=3,
+                )
             self._use_filters = False
             t60_s = np.maximum(t60, 1.0) * 1e-3
             #round trip is m+frame_size, not m, since block processing
@@ -428,10 +447,18 @@ class DirectionalAbsorptionFilters:
 
     def _fit_filters(self, t60_ms: NDArray, n_fft: int = 4096) -> None:
         """Fit one IIR filter per channel from T60(ω) and delay length."""
+        import warnings
+
         # Pre-compute air absorption if enabled
         air_atten_db = None
         if self.air_absorption:
             air_atten_db = air_absorption_db_per_meter(self.freqs)
+            self.boundary_attenuation_db = np.zeros(
+                (self.N_total, len(self.freqs))
+            )
+            self.air_attenuation_db = np.zeros_like(self.boundary_attenuation_db)
+            worst_deficit = 0.0
+            worst_band = None
 
         for i in range(self.N_total):
             # Eq. 6-8: target gain spectrum for this channel
@@ -443,13 +470,32 @@ class DirectionalAbsorptionFilters:
                 + self.frame_size
                 + int(np.ceil(self.filter_order / 2))
             )
-            target_gains = db2lin(
-                -60.0 * effective_len / (self.sample_rate * t60_s)
-            )
-            # Apply air absorption: extra attenuation per delay-line path
+            # Total attenuation the recirculation must lose per round trip
+            # to realise the target T60.
+            required_db = 60.0 * effective_len / (self.sample_rate * t60_s)
             if air_atten_db is not None:
+                # Air absorption is part of this budget, not an extra loss on
+                # top of it: the medium takes its share of ``required_db`` and
+                # the boundary supplies the rest, so the realised T60 stays
+                # equal to the target.  (The filter is the only loss element
+                # in the loop, so it still implements the full ``required_db``;
+                # the split below is what the model attributes to each.)
+                # The air share is computed over the physical path only —
+                # frame_size and filter group delay are block-processing
+                # latency, not propagation.
                 path_m = self.delay_lengths[i] / self.sample_rate * _SPEED_OF_SOUND
-                target_gains *= db2lin(-air_atten_db * path_m)
+                air_db = air_atten_db * path_m
+                boundary_db = required_db - air_db
+                self.air_attenuation_db[i] = air_db
+                self.boundary_attenuation_db[i] = boundary_db
+                # A non-positive boundary share means air absorption alone
+                # already decays faster than the target: no real room could
+                # sustain this T60 at these atmospheric conditions.
+                deficit = float(np.min(boundary_db))
+                if deficit < worst_deficit:
+                    worst_deficit = deficit
+                    worst_band = float(self.freqs[int(np.argmin(boundary_db))])
+            target_gains = db2lin(-required_db)
             interp, _ = interpolate_magnitude_spectrum(
                 target_gains,
                 self.freqs,
@@ -471,6 +517,18 @@ class DirectionalAbsorptionFilters:
                 p = p * (0.999 / max_pole)
                 b, a = zpk2tf(z, p, k)
             self._num_coeffs[i], self._den_coeffs[i] = b, a
+
+        if air_atten_db is not None and worst_band is not None:
+            warnings.warn(
+                f"Target T60 exceeds what air absorption alone permits at "
+                f"{worst_band:.0f} Hz (boundary share {worst_deficit:.3f} dB "
+                f"per round trip, i.e. negative). The requested T60 is still "
+                f"realised, but no real room could sustain it at these "
+                f"atmospheric conditions — shorten the target T60 in that "
+                f"band, or lower the humidity/temperature.",
+                RuntimeWarning,
+                stacklevel=4,
+            )
 
     def process(self, x: NDArray) -> NDArray:
         """Apply per-channel absorption to a (N_total, frame_size) block."""
@@ -631,6 +689,14 @@ class PlaneWaveDFDN:
             All-pass warping coefficient for Prony fitting.
         feedback_type : FeedbackMatrixType
             Type of base N×N feedback matrix.
+        air_absorption : bool, optional
+            Account for atmospheric absorption (ISO 9613-1) within the
+            target T60 budget rather than as an extra loss on top of it.
+            The realised T60 still equals *t60_per_direction_ms*; what
+            changes is that the required attenuation is split into a
+            medium share and a boundary share, and a warning is raised if
+            the requested T60 is longer than air absorption alone permits.
+            Requires *freqs*.  Default ``False``.
         lateral_mix : float, optional
             Inter-direction mixing strength in [0, 1].  ``0`` (default,
             faithful to ICASSP 2020) uses ``A ⊗ I_Q`` and preserves
