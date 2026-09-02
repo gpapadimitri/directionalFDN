@@ -519,3 +519,47 @@ class TestAirAbsorptionSplit:
         )
         assert pw.air_attenuation_db.shape == (pw.total_delay_lines, 8)
         assert pw.boundary_attenuation_db.shape == (pw.total_delay_lines, 8)
+
+
+class TestAnalysisHelpers:
+    FS = 48000.0
+
+    def _synthetic_ir(self, t60=1.2, seconds=3.0):
+        n = int(seconds * self.FS)
+        t = np.arange(n) / self.FS
+        rng = np.random.default_rng(0)
+        return rng.standard_normal(n) * 10.0 ** (-3.0 * t / t60)
+
+    def test_estimate_t60_bands(self):
+        from src.utils import estimate_t60_bands
+
+        rt, fc = estimate_t60_bands(self._synthetic_ir(1.2), self.FS)
+        assert rt.shape == fc.shape
+        np.testing.assert_allclose(rt[1:-1], 1.2, rtol=0.10)
+
+    def test_mixing_time_is_positive(self):
+        from src.utils import mixing_time_ms
+
+        assert mixing_time_ms(self._synthetic_ir(), self.FS) >= 0.0
+
+    def test_mixing_time_shorter_for_denser_ir(self):
+        """White noise is fully diffuse immediately; a sparse train is not."""
+        from src.utils import mixing_time_ms
+
+        dense = self._synthetic_ir()
+        sparse = np.zeros_like(dense)
+        sparse[::400] = dense[::400] * 20.0
+        assert mixing_time_ms(dense, self.FS) <= mixing_time_ms(sparse, self.FS)
+
+    def test_pole_bounds_below_unity_for_a_decaying_fdn(self):
+        from src.fdn.absorption_design import design_absorption_sos
+        from src.utils import pole_bounds
+
+        delays = np.array([1039, 1213, 1381, 1523])
+        freqs = np.array([63.0, 125, 250, 500, 1000, 2000, 4000, 8000])
+        t60 = np.array([1.8, 1.7, 1.6, 1.4, 1.2, 1.0, 0.7, 0.45])
+        sos = design_absorption_sos(t60, freqs, delays, self.FS)
+        A = np.linalg.qr(np.random.default_rng(0).standard_normal((4, 4)))[0]
+        _, max_curve, f = pole_bounds(delays, sos, A, self.FS)
+        assert np.all(max_curve < 1.0)
+        assert f[0] == pytest.approx(0.0)

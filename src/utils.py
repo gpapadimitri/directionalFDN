@@ -8,6 +8,8 @@ from scipy.signal import butter, sosfilt
 import pyfar as pf
 from pyrato.edc import energy_decay_curve_chu_lundeby, schroeder_integration
 from pyrato.parameters import reverberation_time_linear_regression
+import pyFDN
+from scipy.signal import sosfreqz
 
 
 def db(x: NDArray | float, is_squared: bool = False) -> NDArray:
@@ -236,4 +238,120 @@ def plot_frequency_response(x, fs, smooth=3):
     ax.set_title("Frequency Response")
     plt.tight_layout()
     plt.show()
+
+
+def estimate_t60_bands(
+    ir: NDArray, fs: float
+) -> tuple[NDArray, NDArray]:
+    """Octave-band T60 by Schroeder-curve fit, without noise compensation.
+
+    Preferred over :func:`estimate_t30` for *synthesised* impulse responses,
+    which have no noise floor: the linear fit runs from -5 dB over 30 dB and is
+    extrapolated to 60 dB.  For *measured* responses keep :func:`estimate_t30`,
+    whose Chu-Lundeby estimator subtracts the measurement noise floor.
+
+    Parameters
+    ----------
+    ir : NDArray
+        Single-channel impulse response.
+    fs : float
+        Sample rate in Hz.
+
+    Returns
+    -------
+    rt : NDArray, shape (8,)
+        T60 in seconds at 62.5 Hz to 8 kHz.
+    f_centre : NDArray, shape (8,)
+        Band centre frequencies in Hz.
+    """
+    return pyFDN.estimate_rt_bands(np.asarray(ir).ravel(), fs, n=8, start=-4)
+
+
+def mixing_time_ms(ir: NDArray, fs: float, pre_delay: int = 0) -> float:
+    """Mixing time in milliseconds (Abel and Huang 2006 echo density).
+
+    The time at which the normalised echo density first reaches 1, i.e. when
+    the response becomes indistinguishable from Gaussian noise.  This is the
+    quantitative answer to whether a DFDN tail is actually diffuse, which is
+    what the ``scattering_amount`` and ``lateral_mix`` parameters are for.
+
+    Parameters
+    ----------
+    ir : NDArray
+        Single-channel impulse response, at least ~100 ms long.
+    fs : float
+        Sample rate in Hz.
+    pre_delay : int
+        Onset offset in samples to measure from.
+
+    Returns
+    -------
+    float
+        Mixing time in ms, or 0.0 if the threshold is never crossed.
+    """
+    t_abel, _ = pyFDN.echo_density(
+        np.asarray(ir).ravel(), n=1024, fs=fs, pre_delay=pre_delay
+    )
+    return float(t_abel)
+
+
+def pole_bounds(
+    delays: NDArray, sos: NDArray, feedback_matrix: NDArray, fs: float,
+    nfft: int = 2**12,
+) -> tuple[NDArray, NDArray, NDArray]:
+    """Upper and lower bounds on the FDN loop pole magnitudes vs frequency.
+
+    A stable, correctly-absorbing FDN keeps the upper curve below 1 at every
+    frequency.  Useful as a design check on the directional absorption, where
+    each direction has its own filter and the usual single-channel intuition
+    does not apply.
+
+    Parameters
+    ----------
+    delays : NDArray, shape (N,)
+        Delay-line lengths in samples.
+    sos : NDArray, shape (n_sections, 6, N)
+        Per-channel absorption SOS bank, as returned by
+        :func:`src.fdn.absorption_design.design_absorption_sos`.
+    feedback_matrix : NDArray, shape (N, N)
+        Scalar feedback matrix.
+    fs : float
+        Sample rate in Hz.
+    nfft : int
+        Number of frequency points.
+
+    Returns
+    -------
+    min_curve, max_curve : NDArray, shape (nfft,)
+        Lower and upper pole-magnitude bounds.
+    freqs : NDArray, shape (nfft,)
+        Frequencies in Hz.
+    """
+    delays = np.asarray(delays, dtype=float).ravel()
+    num = delays.size
+
+    # pole_boundaries wants an object exposing per-channel (b, a) of shape
+    # (N, 1, len); convert each SOS cascade to a single transfer function.
+    from scipy.signal import sos2tf
+
+    b_list, a_list = [], []
+    for i in range(num):
+        b_i, a_i = sos2tf(np.asarray(sos)[:, :, i])
+        b_list.append(b_i)
+        a_list.append(a_i)
+    order = max(max(len(v) for v in b_list), max(len(v) for v in a_list))
+    b_arr = np.zeros((num, 1, order))
+    a_arr = np.zeros((num, 1, order))
+    for i in range(num):
+        b_arr[i, 0, : len(b_list[i])] = b_list[i]
+        a_arr[i, 0, : len(a_list[i])] = a_list[i]
+
+    class _Absorption:
+        b = b_arr
+        a = a_arr
+
+    A3 = np.asarray(feedback_matrix, dtype=float)
+    if A3.ndim == 2:
+        A3 = A3[:, :, np.newaxis]
+    return pyFDN.pole_boundaries(delays, _Absorption(), A3, fs, nfft=nfft)
 
