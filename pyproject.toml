@@ -21,6 +21,7 @@ dependencies = [
     "pyfar>=0.8",
     "spharpy>=1.0",
     "pyrato>=1.0",
+    "pyFDN>=0.2.0",
 ]
 
 [project.optional-dependencies]
