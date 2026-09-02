@@ -5,58 +5,19 @@ import numpy as np
 import pyfar as pf
 import pyFDN
 from numpy.typing import NDArray
-from pyrato.edc import energy_decay_curve_chu_lundeby, schroeder_integration
+from pyrato.edc import energy_decay_curve_chu_lundeby
 from pyrato.parameters import reverberation_time_linear_regression
-from scipy.fft import rfft, rfftfreq
 from scipy.signal import butter, sosfilt
 
 
-def db(x: NDArray | float, is_squared: bool = False) -> NDArray:
-    """Convert a linear magnitude to decibels.
+#: Linear magnitude to decibels, and back.  Re-exported from pyFDN rather than
+#: reimplemented; both clamp instead of biasing, so they are exact inverses.
+lin2db = pyFDN.lin_to_db
+db2lin = pyFDN.db_to_lin
 
-    Parameters
-    ----------
-    x : array_like
-        Linear magnitude(s).
-    is_squared : bool
-        If *True*, treat *x* as a power quantity (10·log10);
-        otherwise as an amplitude quantity (20·log10).
-
-    Returns
-    -------
-    NDArray
-        Value(s) in dB, clipped to −200 dB minimum.
-    """
-    x = np.asarray(x, dtype=float)
-    factor = 10.0 if is_squared else 20.0
-    eps = np.finfo(np.float64).eps
-    return np.clip(factor * np.log10(np.abs(x) + eps), a_min=-200, a_max=None)
-
-
-def db2lin(dB: NDArray | float) -> NDArray | float:
-    """Convert decibels to linear amplitude."""
-    return 10.0 ** (np.asarray(dB, dtype=float) / 20.0)
-
-
-def lin2db(linear: NDArray | float) -> NDArray | float:
-    """Convert linear amplitude to decibels."""
-    return 20.0 * np.log10(np.abs(np.asarray(linear, dtype=float)) + 1e-32)
-
-
-def ms_to_samps(ms: NDArray | float, fs: float) -> int | NDArray:
-    """Convert milliseconds to an integer sample count.
-
-    Parameters
-    ----------
-    ms : float or array_like
-        Time in milliseconds.
-    fs : float
-        Sample rate in Hz.
-    """
-    samp = np.asarray(ms, dtype=float) * 1e-3 * fs
-    if samp.ndim == 0:
-        return int(samp)
-    return samp.astype(np.int64)
+#: Milliseconds to samples.  pyFDN rounds where the previous local version
+#: truncated -- a sub-sample difference on delay-range bounds.
+ms_to_samps = pyFDN.ms_to_smp
 
 
 # ---------------------------------------------------------------------------
@@ -107,7 +68,11 @@ def estimate_t30(ir: NDArray, fs: float, bands: NDArray = OCTAVE_BANDS) -> NDArr
 
 
 def plot_t30(ir: NDArray, fs: float) -> None:
-    """Plot frequency-dependent reverberation time from an impulse response.
+    """Plot octave-band reverberation time from a *synthesised* impulse response.
+
+    Uses :func:`estimate_t60_bands`, i.e. pyFDN's Schroeder fit over its own
+    octave filterbank.  For a *measured* response prefer :func:`estimate_t30`,
+    whose Chu-Lundeby estimator subtracts the measurement noise floor.
 
     Parameters
     ----------
@@ -116,18 +81,16 @@ def plot_t30(ir: NDArray, fs: float) -> None:
     fs : float
         Sample rate in Hz.
     """
+    t60, f_centre = estimate_t60_bands(ir, fs)
 
-    bands = OCTAVE_BANDS
-    t60 = estimate_t30(ir, fs, bands)
-    
     fig, ax = plt.subplots(figsize=(7, 4))
-    labels = [f"{int(f)}" if f < 1000 else f"{f:.0f}" for f in bands]
-    ax.plot(np.arange(len(bands)), t60, color="red", marker="o")
+    labels = [f"{fc:.0f}" if fc < 1000 else f"{fc / 1000:.0f}k" for fc in f_centre]
+    ax.plot(np.arange(len(f_centre)), t60, color="red", marker="o")
     ax.set_ylim(bottom=0, top=np.nanmax(t60) * 1.1)
-    ax.set_xticks(np.arange(len(bands)))
+    ax.set_xticks(np.arange(len(f_centre)))
     ax.set_xticklabels(labels)
     ax.set_xlabel("Frequency (Hz)")
-    ax.set_ylabel("T30 (s)")
+    ax.set_ylabel("T60 (s)")
     ax.grid(axis="y", alpha=0.3)
     plt.tight_layout()
     plt.show()
@@ -155,7 +118,11 @@ def plot_time_domain(ir: NDArray, fs: float) -> None:
 
 
 def plot_edc(ir: NDArray, fs: float) -> None:
-    """Plot the energy decay curve (EDC) in dB, optionally per octave band.
+    """Plot broadband and octave-band energy decay curves in dB.
+
+    Built on pyFDN's :func:`~pyFDN.edc`, :func:`~pyFDN.octave_bands` and
+    :func:`~pyFDN.octave_band_filterbank`, so the band edges and the decay
+    curve match what :func:`estimate_t60_bands` fits its slopes to.
 
     Parameters
     ----------
@@ -164,37 +131,23 @@ def plot_edc(ir: NDArray, fs: float) -> None:
     fs : float
         Sample rate in Hz.
     """
-    bands = OCTAVE_BANDS
-    fig, ax = plt.subplots(figsize=(7, 4))
+    ir = np.asarray(ir, dtype=float).ravel()
     t = np.arange(len(ir)) / fs
 
-    # Broadband EDC via pyrato Schroeder integration
-    sig = pf.Signal(ir[np.newaxis, :], fs)
-    edc_pf = schroeder_integration(sig)
-    edc_data = edc_pf.time[0]
-    edc_db = 10.0 * np.log10(edc_data / (edc_data[0] + 1e-30) + 1e-30)
-    ax.plot(t, edc_db, color="black", linewidth=1.5, label="Broadband")
+    def _db(curve: NDArray) -> NDArray:
+        return 10.0 * np.log10(curve / (curve[0] + 1e-30) + 1e-30)
 
-    # Per-band EDCs via pyrato Schroeder integration
-    if bands is not None:
-        cmap = plt.cm.coolwarm(np.linspace(0, 1, len(bands)))
-        for i, fc in enumerate(bands):
-            f_lo = fc / np.sqrt(2)
-            f_hi = fc * np.sqrt(2)
-            if f_hi >= fs / 2:
-                continue
-            sos = butter(4, [f_lo, f_hi], btype="band", fs=fs, output="sos")
-            filtered = sosfilt(sos, ir)
-            band_sig = pf.Signal(filtered[np.newaxis, :], fs)
-            band_edc_pf = schroeder_integration(band_sig)
-            band_edc_data = band_edc_pf.time[0]
-            band_edc_db = 10.0 * np.log10(
-                band_edc_data / (band_edc_data[0] + 1e-30) + 1e-30
-            )
-            label = f"{int(fc)} Hz" if fc < 1000 else f"{fc/1000:.0f} kHz"
-            ax.plot(t, band_edc_db, color=cmap[i], linewidth=0.9,
-                    alpha=0.8, label=label)
-        ax.legend(fontsize=7, loc="upper right")
+    fig, ax = plt.subplots(figsize=(7, 4))
+    ax.plot(t, _db(pyFDN.edc(ir)), color="black", linewidth=1.5, label="Broadband")
+
+    bands, f_centre = pyFDN.octave_bands(fc=1000.0, start=-4, n=8, fs=fs)
+    sos_bank = pyFDN.octave_band_filterbank(bands, fs)
+    cmap = plt.cm.coolwarm(np.linspace(0, 1, len(f_centre)))
+    for i, (fc, sos) in enumerate(zip(f_centre, sos_bank)):
+        band_edc = pyFDN.edc(sosfilt(sos, ir))
+        label = f"{fc:.0f} Hz" if fc < 1000 else f"{fc / 1000:.0f} kHz"
+        ax.plot(t, _db(band_edc), color=cmap[i], linewidth=0.9, alpha=0.8, label=label)
+    ax.legend(fontsize=7, loc="upper right")
 
     ax.set_xlabel("Time (s)")
     ax.set_ylabel("Energy (dB)")
@@ -314,3 +267,87 @@ def mixing_time_ms(ir: NDArray, fs: float, pre_delay: int = 0) -> float:
         return float("nan")
     return float(t_abel)
 
+
+
+def pole_bounds(
+    delays: NDArray,
+    sos: NDArray,
+    feedback_matrix: NDArray,
+    fs: float,
+    nfft: int = 2**12,
+) -> tuple[NDArray, NDArray, NDArray]:
+    """Bounds on the FDN loop's pole magnitudes against frequency.
+
+    A stable, correctly-absorbing FDN keeps the upper curve below 1 everywhere.
+    With per-direction absorption filters that is a real design check, since
+    the single-channel intuition does not carry over.
+
+    This reimplements :func:`pyFDN.pole_boundaries` from the SOS cascade rather
+    than calling it.  That function needs a direct-form ``(b, a)`` pair per
+    channel, and flattening an 11-section cascade with ``scipy.signal.sos2tf``
+    is numerically indefensible at order 22: the flattened response reports a
+    peak magnitude of 5.69 where the cascade's true peak is 0.92, and picks up
+    a pole at 1.13 that the cascade does not have.  The maths below is the
+    same; only the route to the filter response differs.
+
+    Parameters
+    ----------
+    delays : NDArray, shape (N,)
+        Delay-line lengths in samples.
+    sos : NDArray, shape (n_sections, 6, N)
+        Per-channel absorption SOS bank, as returned by
+        :func:`src.fdn.absorption_design.design_absorption_sos`.
+    feedback_matrix : NDArray, shape (N, N) or (N, N, order)
+        Scalar or FIR-polynomial feedback matrix.
+    fs : float
+        Sample rate in Hz.
+    nfft : int
+        Number of frequency points from DC to Nyquist.
+
+    Returns
+    -------
+    min_curve, max_curve : NDArray, shape (nfft,)
+        Lower and upper bounds on pole magnitude.
+    freqs : NDArray, shape (nfft,)
+        Frequencies in Hz.
+    """
+    from scipy.signal import sosfreqz
+
+    delays_arr = np.asarray(delays, dtype=float).ravel()
+    sos_arr = np.asarray(sos, dtype=float)
+    if sos_arr.ndim != 3 or sos_arr.shape[1] != 6:
+        raise ValueError("sos must have shape (n_sections, 6, N)")
+    num = delays_arr.size
+    if sos_arr.shape[2] != num:
+        raise ValueError("sos must carry one cascade per delay line")
+
+    omega = np.linspace(0.0, np.pi, nfft)
+
+    # Feedback-matrix singular values per bin.  A scalar matrix is frequency
+    # independent, so its curves are flat.
+    A = np.asarray(feedback_matrix, dtype=float)
+    if A.ndim == 2:
+        A = A[:, :, np.newaxis]
+    A_w = np.fft.fft(A, n=2 * nfft, axis=2)[:, :, :nfft]
+    sv_min = np.empty(nfft)
+    sv_max = np.empty(nfft)
+    for k in range(nfft):
+        s = np.linalg.svd(A_w[:, :, k], compute_uv=False)
+        sv_min[k] = np.min(np.abs(s)) ** (1.0 / delays_arr.min())
+        sv_max[k] = np.max(np.abs(s)) ** (1.0 / delays_arr.max())
+
+    # Per-channel absorption, as a gain per sample of the loop it sits in.
+    # The group delay is differentiated from the cascade's own unwrapped phase
+    # rather than taken from a flattened transfer function.
+    per_sample = np.empty((nfft, num))
+    for i in range(num):
+        _, h = sosfreqz(sos_arr[:, :, i], worN=omega)
+        group_delay = -np.gradient(np.unwrap(np.angle(h)), omega)
+        loop = np.maximum(delays_arr[i] + group_delay, 1.0)
+        per_sample[:, i] = np.abs(h) ** (1.0 / loop)
+
+    return (
+        per_sample.min(axis=1) * sv_min,
+        per_sample.max(axis=1) * sv_max,
+        omega / np.pi * fs / 2.0,
+    )

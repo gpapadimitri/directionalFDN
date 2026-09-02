@@ -792,3 +792,103 @@ class TestLosslessnessChecks:
             lateral_mix=0.5,
         )
         assert pyFDN.is_unilossless(pw._kronecker_matrix)
+
+
+class TestPoleBounds:
+    """SOS-native reimplementation of pyFDN.pole_boundaries.
+
+    pyFDN's own version needs a direct-form (b, a) per channel; flattening an
+    11-section cascade with sos2tf is numerically indefensible (measured max
+    |H| 5.69 against the cascade's true 0.92, plus a spurious pole at 1.13).
+    This works from the cascade directly.
+    """
+
+    FS = 48000.0
+    FREQS = np.array([63.0, 125, 250, 500, 1000, 2000, 4000, 8000])
+    DELAYS = np.array([1039, 1213, 1381, 1523])
+
+    def _sos(self, t60_s):
+        from src.fdn.absorption_design import design_absorption_sos
+
+        return design_absorption_sos(t60_s, self.FREQS, self.DELAYS, self.FS)
+
+    def _A(self):
+        return np.linalg.qr(np.random.default_rng(0).standard_normal((4, 4)))[0]
+
+    def test_shapes_and_frequency_axis(self):
+        from src.utils import pole_bounds
+
+        lo, hi, f = pole_bounds(
+            self.DELAYS, self._sos(np.full(8, 1.2)), self._A(), self.FS, nfft=512
+        )
+        assert lo.shape == hi.shape == f.shape == (512,)
+        assert f[0] == pytest.approx(0.0)
+        assert f[-1] == pytest.approx(self.FS / 2, rel=1e-3)
+
+    def test_lossy_fdn_stays_below_unity(self):
+        """An orthogonal A has all singular values 1, so the bound is the
+        absorption -- which must be lossy at every frequency."""
+        from src.utils import pole_bounds
+
+        _, hi, _ = pole_bounds(
+            self.DELAYS, self._sos(np.full(8, 1.2)), self._A(), self.FS
+        )
+        assert np.all(hi < 1.0)
+
+    def test_shorter_t60_lowers_the_bound(self):
+        from src.utils import pole_bounds
+
+        _, hi_long, _ = pole_bounds(
+            self.DELAYS, self._sos(np.full(8, 2.0)), self._A(), self.FS
+        )
+        _, hi_short, _ = pole_bounds(
+            self.DELAYS, self._sos(np.full(8, 0.5)), self._A(), self.FS
+        )
+        assert np.all(hi_short < hi_long)
+
+    def test_min_curve_does_not_exceed_max(self):
+        from src.utils import pole_bounds
+
+        lo, hi, _ = pole_bounds(
+            self.DELAYS, self._sos(np.full(8, 1.2)), self._A(), self.FS
+        )
+        assert np.all(lo <= hi + 1e-12)
+
+    def test_accepts_a_2d_feedback_matrix(self):
+        from src.utils import pole_bounds
+
+        lo, hi, f = pole_bounds(
+            self.DELAYS, self._sos(np.full(8, 1.2)), np.eye(4), self.FS, nfft=256
+        )
+        assert lo.shape == (256,)
+
+
+class TestHelpersComeFromPyFDN:
+    def test_db_helpers_are_pyfdn(self):
+        import pyFDN
+
+        from src import utils
+
+        assert utils.lin2db is pyFDN.lin_to_db
+        assert utils.db2lin is pyFDN.db_to_lin
+        assert utils.ms_to_samps is pyFDN.ms_to_smp
+
+    def test_db_roundtrip_still_holds(self):
+        from src.utils import db2lin, lin2db
+
+        for value in (0.0, -6.0, -20.0, 6.0):
+            assert abs(float(lin2db(db2lin(value))) - value) < 1e-10
+
+    def test_ms_conversion(self):
+        from src.utils import ms_to_samps
+
+        assert ms_to_samps(1000.0, 48000.0) == 48000
+        assert ms_to_samps(0.0, 48000.0) == 0
+        np.testing.assert_array_equal(
+            ms_to_samps(np.array([10.0, 60.0]), 48000.0), [480, 2880]
+        )
+
+    def test_dead_db_helper_is_gone(self):
+        from src import utils
+
+        assert not hasattr(utils, "db")
