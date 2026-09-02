@@ -52,14 +52,18 @@ from scipy.signal import lfilter, tf2zpk, zpk2tf
 
 from scipy.linalg import hadamard
 
+from pyFDN import SOSFilterBank
+
 from . import spatial
-from .delay_line import DelayLine, generate_distinct_delay_lengths
+from .absorption_design import design_absorption_sos
+from .delay_line import generate_delay_lengths
 from .feedback_matrix import FeedbackMatrix, FeedbackMatrixType
 from .filter_fitting import (
     interpolate_magnitude_spectrum,
     prony_warped,
     tf2minphase,
 )
+from .render import ScalarGains, render_fdn
 from ..utils import db2lin
 
 
@@ -140,6 +144,78 @@ def air_absorption_db_per_meter(
         )
     )
     return alpha
+
+
+def air_absorption_split(
+    t60_s: NDArray,
+    freqs: NDArray,
+    delays: NDArray,
+    fs: float,
+    *,
+    temperature_c: float = 20.0,
+    humidity_percent: float = 50.0,
+    pressure_kpa: float = 101.325,
+) -> tuple[NDArray, NDArray]:
+    """Attribute the required round-trip attenuation to medium and boundary.
+
+    Air absorption is part of the T60 budget, not an extra loss on top of it:
+    the medium takes its share of the attenuation each round trip must lose,
+    and the boundary supplies the rest.  The realised T60 is therefore
+    unchanged by this function -- it only says how the loss divides.
+
+    A non-positive boundary share means air absorption alone already decays
+    faster than the target, i.e. no real room could sustain that T60 at these
+    atmospheric conditions; this raises a ``RuntimeWarning`` naming the worst
+    band.
+
+    Parameters
+    ----------
+    t60_s : NDArray, shape (N, n_bands)
+        Target T60 in seconds, one row per delay line.
+    freqs : NDArray, shape (n_bands,)
+        Frequencies in Hz.
+    delays : NDArray, shape (N,)
+        Delay-line lengths in samples.  The air share is computed over the
+        physical propagation path only.
+    fs : float
+        Sample rate in Hz.
+    temperature_c, humidity_percent, pressure_kpa : float
+        Atmospheric conditions, passed to :func:`air_absorption_db_per_meter`.
+
+    Returns
+    -------
+    air_db, boundary_db : NDArray, shape (N, n_bands)
+        Attenuation in dB per round trip attributed to each.
+    """
+    import warnings
+
+    t60_s = np.atleast_2d(np.asarray(t60_s, dtype=float))
+    delays = np.asarray(delays, dtype=float).ravel()
+    alpha_db_per_m = air_absorption_db_per_meter(
+        np.asarray(freqs, dtype=float),
+        temperature_c=temperature_c,
+        humidity_percent=humidity_percent,
+        pressure_kpa=pressure_kpa,
+    )
+
+    required_db = 60.0 * delays[:, np.newaxis] / (fs * np.maximum(t60_s, 1e-3))
+    path_m = delays[:, np.newaxis] / fs * _SPEED_OF_SOUND
+    air_db = alpha_db_per_m[np.newaxis, :] * path_m
+    boundary_db = required_db - air_db
+
+    worst = float(np.min(boundary_db))
+    if worst < 0.0:
+        band = float(np.asarray(freqs)[int(np.argmin(np.min(boundary_db, axis=0)))])
+        warnings.warn(
+            f"Target T60 exceeds what air absorption alone permits at "
+            f"{band:.0f} Hz (boundary share {worst:.3f} dB per round trip, "
+            f"i.e. negative). The requested T60 is still realised, but no real "
+            f"room could sustain it at these atmospheric conditions -- shorten "
+            f"the target T60 in that band, or lower the humidity/temperature.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+    return air_db, boundary_db
 
 
 def delay_range_from_room(
@@ -607,9 +683,11 @@ class PlaneWaveDFDN:
         self.num_outputs = (output_sh_order + 1) ** 2  # Ambisonics channels
 
         # State
-        self.delay_lines: list[DelayLine] | None = None
         self.delay_length_samps: NDArray | None = None
-        self.absorption: DirectionalAbsorptionFilters | None = None
+        self.absorption: ScalarGains | SOSFilterBank | None = None
+        self.absorption_sos: NDArray | None = None
+        self.air_attenuation_db: NDArray | None = None
+        self.boundary_attenuation_db: NDArray | None = None
         self._kronecker_matrix: NDArray | None = None
         self._base_feedback: FeedbackMatrix | None = None
         self._encoding_matrix: NDArray | None = None  # E (Eq. 13)
@@ -725,7 +803,7 @@ class PlaneWaveDFDN:
         # 1. Delay-line lengths — independent per channel (ICASSP Sec. 3)
         if rng is None and self.seed is not None:
             rng = np.random.default_rng(self.seed)
-        all_lengths = generate_distinct_delay_lengths(
+        all_lengths = generate_delay_lengths(
             delay_range_ms, N * Q, self.sample_rate, rng=rng
         )
         self.delay_length_samps = all_lengths
@@ -764,22 +842,35 @@ class PlaneWaveDFDN:
                 f"t60_per_direction_ms must be scalar, (n_bands,), (Q={Q},), "
                 f"or (Q={Q}, n_bands), got shape {t60.shape}."
             )
-        self.absorption = DirectionalAbsorptionFilters(
-            N * Q,
-            all_lengths,
-            self.sample_rate,
-            F,
-            t60_expanded,
-            freqs=freqs,
-            filter_order=filter_order,
-            warp_factor=warp_factor,
-            air_absorption=air_absorption,
-        )
+        if freqs is None:
+            # Broadband: one scalar gain per channel, round trip = m exactly.
+            t60_s = np.maximum(t60_expanded, 1.0) * 1e-3
+            gains = db2lin(-60.0 * all_lengths / (self.sample_rate * t60_s))
+            self.absorption = ScalarGains(gains)
+            self.absorption_sos = None
+            if air_absorption:
+                import warnings
 
-        # 4. Delay lines
-        self.delay_lines = [
-            DelayLine(int(m), F) for m in all_lengths
-        ]
+                warnings.warn(
+                    "air_absorption is ignored for a broadband T60: the "
+                    "absorption coefficient is frequency-dependent, so the "
+                    "medium/boundary split cannot be evaluated. Pass a "
+                    "frequency-dependent T60 with freqs to use it.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+        else:
+            t60_2d = np.atleast_2d(t60_expanded) * 1e-3
+            if t60_2d.shape[0] == 1:
+                t60_2d = np.repeat(t60_2d, N * Q, axis=0)
+            self.absorption_sos = design_absorption_sos(
+                t60_2d, freqs, all_lengths, self.sample_rate
+            )
+            self.absorption = SOSFilterBank(self.absorption_sos, N * Q)
+            if air_absorption:
+                self.air_attenuation_db, self.boundary_attenuation_db = (
+                    air_absorption_split(t60_2d, freqs, all_lengths, self.sample_rate)
+                )
 
         # 5. Output encoding matrix E (Eq. 13) — default: Ambisonics
         self._init_ambisonics_encoding()
@@ -1022,75 +1113,46 @@ class PlaneWaveDFDN:
         if input_data.shape[0] != 1:
             raise ValueError("Input must be mono (1 channel).")
 
-        N, Q, F = self.num_delay_line_groups, self.Q, self.frame_size
+        N, Q = self.num_delay_line_groups, self.Q
         NQ = N * Q
         ir_len = input_data.shape[-1]
 
-        # Build gains
-        b = self._build_input_gains(source_azimuth, source_elevation)
-        b = b * float(reverb_gain)
-        c = self._build_output_gains()  # (Q, NQ)
-        d = self._build_direct_gain(source_azimuth, source_elevation)  # ((L_out+1)², 1)
-        d = d * float(direct_gain)
-        E = self._encoding_matrix  # ((L_out+1)², Q)
-        A = self._kronecker_matrix  # (NQ, NQ)
+        b = self._build_input_gains(source_azimuth, source_elevation) * float(
+            reverb_gain
+        )                                            # (NQ, 1)
+        c = self._build_output_gains()               # (Q, NQ)
+        d = self._build_direct_gain(source_azimuth, source_elevation) * float(
+            direct_gain
+        )                                            # (n_out, 1)
+        E = self._encoding_matrix                    # (n_out, Q)
 
-        # Pre-compute early-reflection signal in the plane-wave grid
-        # domain.  ERs are added to ``grid_output`` just before the
-        # Ambisonics encoder E, so they share E's gain convention with
-        # the late reverb but preserve their exact arrival times
-        # (injecting them into the delay-line input would delay them by
-        # one full delay-line length).
-        has_er = self._early_reflections is not None
-        er_grid = None
-        if has_er:
+        # Early reflections are a precomputed, time-varying grid signal.
+        # process_fdn only takes static B and D, so they ride in as Q extra
+        # input channels: routed into delay-line group lambda by B, and tapped
+        # straight to the output through the encoder by D.  This reproduces
+        # dl_in = b x + er_grid and y = E (c s + er_grid) + d x exactly.
+        if self._early_reflections is not None:
             er_grid = self._build_er_grid_signal(input_data, ir_len, er_gain)
+            X = np.vstack([input_data, er_grid])                      # (1+Q, len)
+            B = np.zeros((NQ, 1 + Q))
+            B[:, 0:1] = b
+            lam_s = self._lambda_group * Q
+            B[lam_s : lam_s + Q, 1:] = np.eye(Q)
+            D = np.zeros((self.num_outputs, 1 + Q))
+            D[:, 0:1] = d
+            D[:, 1:] = E
+        else:
+            X, B, D = input_data, b, d
 
-        # Allocate
-        output_ambi = np.zeros((self.num_outputs, ir_len))
-        fb_out = np.zeros((NQ, F))
-        dl_out = np.zeros((NQ, F))
-
-        sample = 0
-        lam_s = self._lambda_group * Q
-        lam_e = lam_s + Q
-        while sample + F <= ir_len:
-            idx = slice(sample, sample + F)
-            x = input_data[:, idx]
-
-            # Input mixing + feedback → delay lines (Eq. 12).  ERs are
-            # also re-injected into delay-line group λ so their energy
-            # feeds the late reverb (Eq. 12, s'(n) term), in addition to
-            # being tapped out directly at the grid stage (Eq. 11).
-            dl_in = b @ x + fb_out
-            if has_er:
-                dl_in[lam_s:lam_e] += er_grid[:, idx]
-
-            # Read / write delay lines
-            for i in range(NQ):
-                dl_out[i] = self.delay_lines[i].read()
-                self.delay_lines[i].write(dl_in[i])
-
-            # Per-direction absorption G_i(z) (Eqs. 6-10)
-            absorbed = self.absorption.process(dl_out)
-
-            # Output: sum across groups in grid domain (Eq. 11 reverb part)
-            grid_output = c @ absorbed  # (Q, F)
-
-            # Inject early reflections in the grid domain so they share
-            # the encoder E's gain convention with the late reverb.
-            if has_er:
-                grid_output = grid_output + er_grid[:, idx]
-
-            # Encode to Ambisonics (Eq. 13) + direct path in SH domain
-            output_ambi[:, idx] += E @ grid_output + d @ x
-
-            # Feedback path: A ⊗ M_Q
-            fb_out = A @ absorbed
-
-            sample += F
-
-        return output_ambi
+        return render_fdn(
+            X,
+            self.delay_length_samps,
+            self._kronecker_matrix,
+            B,
+            E @ c,
+            D,
+            absorption=self.absorption,
+        )
 
     # ==================================================================
     # Early reflections buffer
@@ -1157,14 +1219,11 @@ class PlaneWaveDFDN:
 
     def reset(self) -> None:
         """Clear all internal state."""
-        if self.delay_lines is not None:
-            for dl in self.delay_lines:
-                dl.reset()
-        if self.absorption is not None:
-            self.absorption.reset()
+        if self.absorption_sos is not None:
+            self.absorption = SOSFilterBank(self.absorption_sos, self.total_delay_lines)
 
     def _check_ready(self) -> None:
-        if self.delay_lines is None:
+        if self.delay_length_samps is None:
             raise RuntimeError("Call setup() before processing.")
         if self._kronecker_matrix is None:
             raise RuntimeError("Kronecker feedback matrix not initialised.")

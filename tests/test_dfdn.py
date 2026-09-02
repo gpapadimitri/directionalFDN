@@ -422,7 +422,7 @@ class TestPlaneWaveDFDN:
         pw = self._make()
         Q = pw.Q  # grid size (t-design may differ from (L+1)²)
         assert pw.total_delay_lines == 4 * Q
-        assert len(pw.delay_lines) == 4 * Q
+        assert len(pw.delay_length_samps) == 4 * Q
         assert pw.delay_length_samps is not None
 
     def test_independent_delay_lengths(self):

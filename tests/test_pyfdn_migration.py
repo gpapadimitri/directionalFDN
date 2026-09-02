@@ -379,3 +379,129 @@ class TestDirectionalFDNCorrectedLoop:
         front = self._make().render(0.0, 0.0, length_seconds=1.0)
         left = self._make().render(np.pi / 2, 0.0, length_seconds=1.0)
         assert not np.allclose(front, left, atol=1e-10)
+
+
+class TestPlaneWaveDFDNCorrectedLoop:
+    FS = 48000.0
+
+    def _make(self, **setup_kwargs):
+        from src.fdn.planewave_dfdn import PlaneWaveDFDN
+
+        pw = PlaneWaveDFDN(self.FS, 8, sh_order=1, frame_size=64, seed=42)
+        kwargs = dict(delay_range_ms=(20.0, 60.0), t60_per_direction_ms=1500.0)
+        kwargs.update(setup_kwargs)
+        pw.setup(**kwargs)
+        return pw
+
+    def test_rir_shape(self):
+        pw = self._make()
+        rir = pw.render(0.0, 0.0, length_seconds=1.0)
+        assert rir.shape[0] == 4
+        assert rir.shape[1] == int(1.0 * self.FS)
+
+    def test_broadband_t60_is_accurate(self, measured_t60):
+        pw = self._make()
+        rir = pw.render(0.0, 0.0, length_seconds=4.0)
+        np.testing.assert_allclose(measured_t60(rir[0], self.FS)[1:], 1.5, rtol=0.08)
+
+    def test_direction_dependent_t60(self, measured_t60):
+        """Directions with a short T60 must decay faster than the long ones."""
+        pw = self._make()
+        t60 = np.where(pw.grid_azimuths < np.pi, 2000.0, 600.0)
+        pw = self._make(t60_per_direction_ms=t60)
+        rir = pw.render(0.0, 0.0, length_seconds=4.0)
+        rt = measured_t60(rir[0], self.FS)
+        # W channel averages all directions, so it lands between the extremes.
+        assert 0.6 < rt[3] < 2.0
+
+    def test_direct_path_amplitude(self):
+        pw = self._make()
+        rir = pw.render(0.0, 0.0, length_seconds=0.5, direct_gain=0.5,
+                        reverb_gain=0.0)
+        # With no reverb feed the first sample is the direct path only.
+        expected = 0.5 / np.sqrt(4.0 * np.pi)
+        assert rir[0, 0] == pytest.approx(expected, rel=1e-6)
+
+    def test_early_reflections_arrive_on_time(self):
+        from src.fdn.planewave_dfdn import Reflection
+
+        pw = self._make()
+        pw.set_early_reflections(
+            [Reflection(gain=0.5, azimuth=0.0, elevation=0.0, delay_samples=200)]
+        )
+        rir = pw.render(0.0, 0.0, length_seconds=0.5, direct_gain=0.0,
+                        reverb_gain=0.0)
+        assert np.abs(rir[0, 200]) > 1e-3
+
+    def test_early_reflections_add_energy(self):
+        from src.fdn.planewave_dfdn import Reflection
+
+        without = self._make().render(0.0, 0.0, length_seconds=1.0)
+        pw = self._make()
+        pw.set_early_reflections(
+            [Reflection(gain=0.5, azimuth=0.0, elevation=0.0, delay_samples=200)]
+        )
+        with_er = pw.render(0.0, 0.0, length_seconds=1.0)
+        assert np.sum(with_er**2) > np.sum(without**2)
+
+
+class TestAirAbsorptionSplit:
+    """The medium/boundary attribution from commit 0554ddd must survive."""
+
+    FS = 48000.0
+    FREQS = np.array([63.0, 125, 250, 500, 1000, 2000, 4000, 8000])
+    DELAYS = np.array([1039, 1213, 1381, 1523])
+
+    def test_shares_sum_to_required_attenuation(self):
+        from src.fdn.planewave_dfdn import air_absorption_split
+
+        t60 = np.tile(np.array([1.8, 1.7, 1.6, 1.4, 1.2, 1.0, 0.7, 0.45]), (4, 1))
+        air, boundary = air_absorption_split(t60, self.FREQS, self.DELAYS, self.FS)
+        required = 60.0 * self.DELAYS[:, None] / (self.FS * t60)
+        np.testing.assert_allclose(air + boundary, required, rtol=1e-12)
+
+    def test_air_share_grows_with_frequency(self):
+        from src.fdn.planewave_dfdn import air_absorption_split
+
+        t60 = np.tile(np.full(8, 1.5), (4, 1))
+        air, _ = air_absorption_split(t60, self.FREQS, self.DELAYS, self.FS)
+        assert np.all(np.diff(air[0]) > 0.0)
+
+    def test_warns_when_target_exceeds_air_budget(self):
+        from src.fdn.planewave_dfdn import air_absorption_split
+
+        # A very long T60 at high frequency leaves no boundary share.
+        t60 = np.tile(np.full(8, 60.0), (4, 1))
+        with pytest.warns(RuntimeWarning, match="air absorption alone permits"):
+            air_absorption_split(t60, self.FREQS, self.DELAYS, self.FS)
+
+    def test_realised_t60_is_unaffected(self):
+        """Attribution must not change the filters, hence not the decay."""
+        from src.fdn.planewave_dfdn import PlaneWaveDFDN
+
+        t60 = np.array([1.8, 1.7, 1.6, 1.4, 1.2, 1.0, 0.7, 0.45]) * 1e3
+        rirs = []
+        for air in (False, True):
+            pw = PlaneWaveDFDN(self.FS, 8, sh_order=1, frame_size=64, seed=42)
+            pw.setup(
+                delay_range_ms=(20.0, 60.0),
+                t60_per_direction_ms=t60,
+                freqs=self.FREQS,
+                air_absorption=air,
+            )
+            rirs.append(pw.render(0.0, 0.0, length_seconds=1.0))
+        np.testing.assert_allclose(rirs[0], rirs[1], atol=1e-12)
+
+    def test_attributes_exposed_on_the_class(self):
+        from src.fdn.planewave_dfdn import PlaneWaveDFDN
+
+        t60 = np.array([1.8, 1.7, 1.6, 1.4, 1.2, 1.0, 0.7, 0.45]) * 1e3
+        pw = PlaneWaveDFDN(self.FS, 8, sh_order=1, frame_size=64, seed=42)
+        pw.setup(
+            delay_range_ms=(20.0, 60.0),
+            t60_per_direction_ms=t60,
+            freqs=self.FREQS,
+            air_absorption=True,
+        )
+        assert pw.air_attenuation_db.shape == (pw.total_delay_lines, 8)
+        assert pw.boundary_attenuation_db.shape == (pw.total_delay_lines, 8)
