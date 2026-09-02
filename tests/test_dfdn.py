@@ -643,18 +643,16 @@ class TestAirAbsorptionAccounting:
     @staticmethod
     def _realised_t60_ms(pw, freqs):
         """Per-band T60 implied by the fitted absorption filters."""
-        from scipy.signal import freqz, group_delay
+        from scipy.signal import sosfreqz
 
-        absn = pw.absorption
-        w = 2.0 * np.pi * freqs / pw.sample_rate
-        out = np.zeros((absn.N_total, len(freqs)))
-        for i in range(absn.N_total):
-            b, a = absn._num_coeffs[i], absn._den_coeffs[i]
-            _, h = freqz(b, a, worN=w)
-            _, gd = group_delay((b, a), w=w)
-            loop = absn.delay_lengths[i] + absn.frame_size + gd
+        sos = pw.absorption_sos            # (n_sections, 6, N)
+        delays = np.asarray(pw.delay_length_samps, dtype=float)
+        w = 2.0 * np.pi * np.asarray(freqs, dtype=float) / pw.sample_rate
+        out = np.zeros((sos.shape[2], len(freqs)))
+        for i in range(sos.shape[2]):
+            _, h = sosfreqz(sos[:, :, i], worN=w)
             att_db = -20.0 * np.log10(np.abs(h))
-            out[i] = 60.0 * loop / (pw.sample_rate * att_db)
+            out[i] = 60.0 * delays[i] / (pw.sample_rate * att_db)
         return out.mean(axis=0) * 1e3
 
     def _make(self, air, t60_ms=None):

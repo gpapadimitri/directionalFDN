@@ -405,14 +405,28 @@ class TestPlaneWaveDFDNCorrectedLoop:
         np.testing.assert_allclose(measured_t60(rir[0], self.FS)[1:], 1.5, rtol=0.08)
 
     def test_direction_dependent_t60(self, measured_t60):
-        """Directions with a short T60 must decay faster than the long ones."""
-        pw = self._make()
-        t60 = np.where(pw.grid_azimuths < np.pi, 2000.0, 600.0)
-        pw = self._make(t60_per_direction_ms=t60)
-        rir = pw.render(0.0, 0.0, length_seconds=4.0)
-        rt = measured_t60(rir[0], self.FS)
-        # W channel averages all directions, so it lands between the extremes.
-        assert 0.6 < rt[3] < 2.0
+        """Per-direction T60 must reach the filters and shape the decay."""
+        grid = self._make()
+        mixed_t60 = np.where(grid.grid_azimuths < np.pi, 2000.0, 600.0)
+
+        long_rir = self._make(t60_per_direction_ms=2000.0).render(
+            0.0, 0.0, length_seconds=4.0)
+        short_rir = self._make(t60_per_direction_ms=600.0).render(
+            0.0, 0.0, length_seconds=4.0)
+        mixed_rir = self._make(t60_per_direction_ms=mixed_t60).render(
+            0.0, 0.0, length_seconds=4.0)
+
+        # A uniformly short room decays faster than a uniformly long one.
+        assert measured_t60(short_rir[0], self.FS)[3] < measured_t60(
+            long_rir[0], self.FS)[3]
+        # A mixed field is not collapsed to either uniform case...
+        assert not np.allclose(mixed_rir, long_rir, atol=1e-12)
+        assert not np.allclose(mixed_rir, short_rir, atol=1e-12)
+        # ...and its total energy lands strictly between them.
+        e_short = np.sum(short_rir**2)
+        e_mixed = np.sum(mixed_rir**2)
+        e_long = np.sum(long_rir**2)
+        assert e_short < e_mixed < e_long
 
     def test_direct_path_amplitude(self):
         pw = self._make()
