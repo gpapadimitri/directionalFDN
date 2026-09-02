@@ -315,3 +315,67 @@ class TestFDNCorrectedLoop:
         assert not np.allclose(first, without_reset, atol=1e-12)
         # ...and reset() puts it back to the initial state.
         np.testing.assert_allclose(first, after_reset, atol=1e-12)
+
+
+class TestDirectionalFDNCorrectedLoop:
+    FS = 48000.0
+
+    def _make(self, **kwargs):
+        from src.fdn.directional_fdn import DirectionalFDN
+
+        dfdn = DirectionalFDN(self.FS, 8, ambisonics_order=1, frame_size=64, seed=42,
+                              **kwargs)
+        dfdn.setup(delay_range_ms=(20.0, 60.0), des_t60_ms=1500.0)
+        return dfdn
+
+    def test_effective_matrix_is_kronecker_when_plain(self):
+        dfdn = self._make()
+        np.testing.assert_allclose(
+            dfdn._effective_feedback_matrix(), dfdn._kronecker_matrix, atol=1e-12
+        )
+
+    def test_effective_matrix_folds_transform(self):
+        from scipy.linalg import block_diag
+
+        from src.fdn.spatial import uniform_directions
+
+        dfdn = self._make()
+        az, el = uniform_directions(24)
+        t60 = np.full(24, 1500.0)
+        t60[az < np.pi] = 900.0
+        dfdn.set_directional_decay(t60, az, el)
+
+        expected = dfdn._kronecker_matrix @ block_diag(
+            *[T @ S for T, S in zip(dfdn.transform.transform_matrices,
+                                    dfdn._scattering_matrices)]
+        )
+        np.testing.assert_allclose(
+            dfdn._effective_feedback_matrix(), expected, atol=1e-12
+        )
+
+    def test_effective_matrix_folds_scattering(self):
+        from scipy.linalg import block_diag
+
+        dfdn = self._make(scattering_amount=0.4)
+        expected = dfdn._kronecker_matrix @ block_diag(*dfdn._scattering_matrices)
+        np.testing.assert_allclose(
+            dfdn._effective_feedback_matrix(), expected, atol=1e-12
+        )
+
+    def test_rir_shape_and_decay(self):
+        dfdn = self._make()
+        rir = dfdn.render(0.0, 0.0, length_seconds=2.0)
+        assert rir.shape[0] == 4
+        first = np.sum(rir[0, : rir.shape[1] // 4] ** 2)
+        last = np.sum(rir[0, -rir.shape[1] // 4 :] ** 2)
+        assert first > last
+
+    def test_broadband_t60_is_accurate(self, measured_t60):
+        dfdn = self._make()
+        rir = dfdn.render(0.0, 0.0, length_seconds=4.0)
+        np.testing.assert_allclose(measured_t60(rir[0], self.FS)[1:], 1.5, rtol=0.08)
+
+    def test_source_direction_still_changes_the_rir(self):
+        front = self._make().render(0.0, 0.0, length_seconds=1.0)
+        left = self._make().render(np.pi / 2, 0.0, length_seconds=1.0)
+        assert not np.allclose(front, left, atol=1e-10)

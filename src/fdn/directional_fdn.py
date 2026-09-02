@@ -30,11 +30,13 @@ from __future__ import annotations
 
 import numpy as np
 from numpy.typing import NDArray
+from scipy.linalg import block_diag
 
 from . import spatial
-from .delay_line import generate_distinct_delay_lengths
+from .delay_line import generate_delay_lengths
 from .fdn import FDN
 from .feedback_matrix import FeedbackMatrix, FeedbackMatrixType
+from .render import render_fdn
 from .transform import DirectionalWeighting
 
 
@@ -139,7 +141,7 @@ class DirectionalFDN(FDN):
         # 1. Delay-line lengths
         if rng is None and self.seed is not None:
             rng = np.random.default_rng(self.seed)
-        group_lengths = generate_distinct_delay_lengths(
+        group_lengths = generate_delay_lengths(
             delay_range_ms, N, self.sample_rate, rng=rng
         )
         # Replicate for all Q channels per group
@@ -294,83 +296,55 @@ class DirectionalFDN(FDN):
         if input_data.shape[0] != 1:
             raise ValueError("Input must be mono (1 channel).")
 
-        N, Q, F = self.num_delay_line_groups, self.Q, self.frame_size
-        ir_len = input_data.shape[-1]
+        N = self.num_delay_line_groups
 
-        # Source encoding
         src_enc = spatial.encode_direction(
             source_azimuth, source_elevation, self.ambisonics_order
         )
-
-        # Build input gains b  (Eq. 17)
         b = self._build_input_gains(src_enc, directional=use_directional_input)
-
-        # Build output gains c  (Eq. 22)
         c = self._build_output_gains()
 
-        # Direct-path gain d — encodes source direction per Eq. 11:
-        #   d = y(φ₀, θ₀)  (SH encoding of the source direction).
-        # The paper does not specify additional scaling; the 1/N factor
-        # here matches the combined input/output gain (1/√N × 1/√N).
+        # Direct-path gain d -- encodes source direction per Eq. 11:
+        #   d = y(phi_0, theta_0)  (SH encoding of the source direction).
+        # The 1/N factor matches the combined input/output gain (1/sqrt(N))^2.
         direct_gain = src_enc.reshape(self.num_outputs, 1) / N
 
-        # Feedback matrix A ⊗ I_Q  (Eq. 20)
-        A = self._kronecker_matrix
-
-        # Pre-computed DWM T_i matrices (Section 3)
-        use_ti = self.transform is not None
-        if use_ti:
-            T_mats = self.transform.transform_matrices
-
-        # Allocate buffers
-        output = np.zeros((self.num_outputs, ir_len))
-        fb_out = np.zeros((self.num_delay_lines, F))
-        dl_out = np.zeros((self.num_delay_lines, F))
-
-        sample = 0
-        while sample + F <= ir_len:
-            idx = slice(sample, sample + F)
-            x = input_data[:, idx]
-
-            # Input mixing + feedback  (Eq. 23 RHS)
-            dl_in = b @ x + fb_out
-
-            # Read / write delay lines  (Eq. 19)
-            for i in range(self.num_delay_lines):
-                dl_out[i] = self.delay_lines[i].read()
-                self.delay_lines[i].write(dl_in[i])
-
-            # Apply base absorption g_i  (Eq. 16 / Eq. 5)
-            absorbed = self.absorption.process(dl_out)
-
-            # Output extraction  (Eq. 22): y = Σ g_i c_i ⊙ s_i + d x
-            output[:, idx] += c @ absorbed + direct_gain @ x
-
-            # Feedback path  (Eq. 23): optionally scatter then transform
-            if self._use_scattering:
-                scattered = np.zeros_like(absorbed)
-                for g in range(N):
-                    s, e = g * Q, (g + 1) * Q
-                    scattered[s:e] = self._scattering_matrices[g] @ absorbed[s:e]
-            else:
-                scattered = absorbed
-
-            if use_ti:
-                transformed = np.zeros_like(scattered)
-                for g in range(N):
-                    s, e = g * Q, (g + 1) * Q
-                    transformed[s:e] = T_mats[g] @ scattered[s:e]
-                fb_out = A @ transformed
-            else:
-                fb_out = A @ scattered
-
-            sample += F
-
-        return output
+        return render_fdn(
+            input_data,
+            self.delay_length_samps,
+            self._effective_feedback_matrix(),
+            b,
+            c,
+            direct_gain,
+            absorption=self._absorption_hook(),
+        )
 
     # ==================================================================
     # Internal helpers
     # ==================================================================
+
+    def _effective_feedback_matrix(self) -> NDArray:
+        """Return the full N*Q x N*Q feedback matrix with T_i and S_i folded in.
+
+        The recirculation path applies, per group, the scattering matrix S_i
+        then the Directional Weighting Matrix T_i, then the Kronecker feedback
+        A kron I_Q.  All three are static, so the composition is a single
+        matrix and the recursion needs no per-block hooks:
+
+            A' = (A kron I_Q) @ blockdiag(T_0 S_0, ..., T_{N-1} S_{N-1})
+        """
+        N = self.num_delay_line_groups
+        blocks = []
+        for g in range(N):
+            block = (
+                self._scattering_matrices[g]
+                if self._scattering_matrices is not None
+                else np.eye(self.Q)
+            )
+            if self.transform is not None:
+                block = self.transform.transform_matrices[g] @ block
+            blocks.append(block)
+        return self._kronecker_matrix @ block_diag(*blocks)
 
     def _init_scattering_matrices(self, amount: float = 0.0) -> None:
         """Generate per-group Q×Q scattering matrices.
