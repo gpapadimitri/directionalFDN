@@ -613,3 +613,81 @@ class TestAnalysisHelpers:
         sparse = np.zeros_like(dense)
         sparse[::400] = dense[::400] * 20.0
         assert np.isnan(mixing_time_ms(sparse, self.FS))
+
+
+class TestFeedbackMatrixFromPyFDN:
+    """The generators are pyFDN's, with reproducibility preserved."""
+
+    def test_hadamard_is_unchanged(self):
+        """The gallery's Hadamard must be bit-identical to the old one."""
+        import pyFDN
+
+        from src.fdn.feedback_matrix import FeedbackMatrix, FeedbackMatrixType
+
+        fb = FeedbackMatrix(8, FeedbackMatrixType.HADAMARD, 64)
+        np.testing.assert_allclose(
+            fb.matrix, pyFDN.fdn_matrix_gallery(8, "Hadamard"), atol=1e-15
+        )
+
+    def test_householder_stays_the_canonical_all_ones(self):
+        """fdn_matrix_gallery randomises Householder; we want the all-ones one."""
+        import pyFDN
+
+        from src.fdn.feedback_matrix import FeedbackMatrix, FeedbackMatrixType
+
+        fb = FeedbackMatrix(8, FeedbackMatrixType.HOUSEHOLDER, 64)
+        np.testing.assert_allclose(
+            fb.matrix, pyFDN.householder_matrix(np.ones(8)), atol=1e-15
+        )
+
+    def test_random_is_reproducible(self):
+        from src.fdn.feedback_matrix import FeedbackMatrix, FeedbackMatrixType
+
+        a = FeedbackMatrix(8, FeedbackMatrixType.RANDOM, 64, seed=42).matrix
+        b = FeedbackMatrix(8, FeedbackMatrixType.RANDOM, 64, seed=42).matrix
+        c = FeedbackMatrix(8, FeedbackMatrixType.RANDOM, 64, seed=7).matrix
+        np.testing.assert_allclose(a, b, atol=1e-15)
+        assert not np.allclose(a, c)
+
+    def test_random_does_not_disturb_the_global_stream(self):
+        """pyFDN's gallery draws from global np.random; we must restore it."""
+        from src.fdn.feedback_matrix import FeedbackMatrix, FeedbackMatrixType
+
+        np.random.seed(0)
+        expected = np.random.rand()
+        np.random.seed(0)
+        FeedbackMatrix(8, FeedbackMatrixType.RANDOM, 64, seed=42)
+        assert np.random.rand() == expected
+
+    @pytest.mark.parametrize(
+        "kind",
+        [
+            "RANDOM",
+            "HADAMARD",
+            "HOUSEHOLDER",
+            "CIRCULANT",
+            "PERMUTATION",
+            "DIAGONALLY_SIMILAR",
+            "ANDERSON",
+            "TINY_ROTATION",
+        ],
+    )
+    def test_every_type_builds_and_is_lossless(self, kind):
+        import pyFDN
+
+        from src.fdn.feedback_matrix import FeedbackMatrix, FeedbackMatrixType
+
+        fb = FeedbackMatrix(8, getattr(FeedbackMatrixType, kind), 64, seed=42)
+        assert fb.matrix.shape == (8, 8)
+        assert pyFDN.is_unilossless(fb.matrix)
+
+    def test_unknown_type_still_raises(self):
+        from src.fdn.feedback_matrix import FeedbackMatrix
+
+        with pytest.raises(ValueError, match="Unsupported feedback matrix type"):
+            FeedbackMatrix(8, "not-a-type", 64)
+
+    def test_matrix_convolve_is_gone(self):
+        from src.fdn.feedback_matrix import FeedbackMatrix
+
+        assert not hasattr(FeedbackMatrix, "matrix_convolve")
