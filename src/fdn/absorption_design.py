@@ -44,6 +44,8 @@ def t60_on_geq_grid(t60_s: NDArray, freqs: NDArray, fs: float) -> NDArray:
         raise ValueError("t60_s and freqs must have the same length")
     if np.any(freqs <= 0.0):
         raise ValueError("freqs must be positive")
+    if np.any(np.diff(freqs) <= 0):
+        raise ValueError("freqs must be strictly ascending")
 
     grid = np.concatenate(([1.0], _GEQ_INTERIOR_HZ, [float(fs)]))
     # np.interp holds the edge values outside the data range, which is the
@@ -79,6 +81,8 @@ def design_absorption_sos(
     """
     delays = np.asarray(delays, dtype=float).ravel()
     num_delays = delays.size
+    if num_delays == 0:
+        raise ValueError("delays must not be empty")
 
     curves = np.atleast_2d(np.asarray(t60_s, dtype=float))
     if curves.shape[0] == 1:

@@ -299,22 +299,13 @@ class TestFDNCorrectedLoop:
         out = fdn.process(np.zeros((1, 4096)))
         assert np.max(np.abs(out)) < 1e-12
 
-    def test_reset_clears_absorption_filter_state(self):
-        """reset() must clear the SOS memory that persists between process() calls."""
+    def test_repeat_render_is_deterministic(self):
+        """A render is a pure function of setup and input; no state carries over."""
         freqs = np.array([63.0, 125, 250, 500, 1000, 2000, 4000, 8000])
         t60_ms = np.array([1.8, 1.7, 1.6, 1.4, 1.2, 1.0, 0.7, 0.45]) * 1e3
         fdn = self._make(t60_ms, freqs=freqs)
         x = self._impulse(0.2)
-
-        first = fdn.process(x)
-        without_reset = fdn.process(x)
-        fdn.reset()
-        after_reset = fdn.process(x)
-
-        # Absorption filter memory carries into the second call...
-        assert not np.allclose(first, without_reset, atol=1e-12)
-        # ...and reset() puts it back to the initial state.
-        np.testing.assert_allclose(first, after_reset, atol=1e-12)
+        np.testing.assert_allclose(fdn.process(x), fdn.process(x), atol=1e-12)
 
 
 class TestDirectionalFDNCorrectedLoop:
@@ -362,6 +353,41 @@ class TestDirectionalFDNCorrectedLoop:
             dfdn._effective_feedback_matrix(), expected, atol=1e-12
         )
 
+    def test_effective_matrix_folds_transform_after_scattering(self):
+        """T_g @ S_g, in that order; both non-identity so the order is pinned."""
+        from scipy.linalg import block_diag
+
+        from src.fdn.spatial import uniform_directions
+
+        dfdn = self._make(scattering_amount=0.4)
+        az, el = uniform_directions(24)
+        t60 = np.full(24, 1500.0)
+        t60[az < np.pi] = 900.0
+        dfdn.set_directional_decay(t60, az, el)
+
+        blocks = [
+            T @ S
+            for T, S in zip(
+                dfdn.transform.transform_matrices, dfdn._scattering_matrices,
+                strict=True,
+            )
+        ]
+        expected = dfdn._kronecker_matrix @ block_diag(*blocks)
+        np.testing.assert_allclose(
+            dfdn._effective_feedback_matrix(), expected, atol=1e-12
+        )
+        # The reversed order must actually differ, or this test proves nothing.
+        reversed_blocks = [
+            S @ T
+            for T, S in zip(
+                dfdn.transform.transform_matrices, dfdn._scattering_matrices,
+                strict=True,
+            )
+        ]
+        assert not np.allclose(
+            block_diag(*blocks), block_diag(*reversed_blocks), atol=1e-12
+        )
+
     def test_rir_shape_and_decay(self):
         dfdn = self._make()
         rir = dfdn.render(0.0, 0.0, length_seconds=2.0)
@@ -379,6 +405,17 @@ class TestDirectionalFDNCorrectedLoop:
         front = self._make().render(0.0, 0.0, length_seconds=1.0)
         left = self._make().render(np.pi / 2, 0.0, length_seconds=1.0)
         assert not np.allclose(front, left, atol=1e-10)
+
+    def test_repeat_render_is_deterministic(self):
+        dfdn = self._make()
+        first = dfdn.render(0.0, 0.0, length_seconds=0.5)
+        second = dfdn.render(0.0, 0.0, length_seconds=0.5)
+        np.testing.assert_allclose(first, second, atol=1e-12)
+
+    def test_render_length_is_not_truncated(self):
+        """render_fdn processes every sample; no frame_size rounding."""
+        rir = self._make().render(0.0, 0.0, length_seconds=0.501)
+        assert rir.shape[1] == int(0.501 * self.FS)
 
 
 class TestPlaneWaveDFDNCorrectedLoop:
@@ -398,6 +435,22 @@ class TestPlaneWaveDFDNCorrectedLoop:
         rir = pw.render(0.0, 0.0, length_seconds=1.0)
         assert rir.shape[0] == 4
         assert rir.shape[1] == int(1.0 * self.FS)
+
+        odd = pw.render(0.0, 0.0, length_seconds=0.501)
+        assert odd.shape[1] == int(0.501 * self.FS)
+
+    def test_broadband_t60_accepts_freqs(self):
+        """A scalar or per-direction broadband T60 must not break when freqs is given."""
+        freqs = np.array([63.0, 125, 250, 500, 1000, 2000, 4000, 8000])
+        scalar = self._make(t60_per_direction_ms=1500.0, freqs=freqs)
+        assert scalar.absorption_sos is None
+
+        grid = self._make()
+        per_dir = self._make(
+            t60_per_direction_ms=np.full(grid.Q, 1500.0), freqs=freqs
+        )
+        assert per_dir.absorption_sos is None
+        assert per_dir.render(0.0, 0.0, length_seconds=0.5).shape[0] == 4
 
     def test_broadband_t60_is_accurate(self, measured_t60):
         pw = self._make()
@@ -457,6 +510,14 @@ class TestPlaneWaveDFDNCorrectedLoop:
         )
         with_er = pw.render(0.0, 0.0, length_seconds=1.0)
         assert np.sum(with_er**2) > np.sum(without**2)
+
+    def test_repeat_render_is_deterministic(self):
+        freqs = np.array([63.0, 125, 250, 500, 1000, 2000, 4000, 8000])
+        t60_ms = np.array([1.8, 1.7, 1.6, 1.4, 1.2, 1.0, 0.7, 0.45]) * 1e3
+        pw = self._make(t60_per_direction_ms=t60_ms, freqs=freqs)
+        first = pw.render(0.0, 0.0, length_seconds=0.5)
+        second = pw.render(0.0, 0.0, length_seconds=0.5)
+        np.testing.assert_allclose(first, second, atol=1e-12)
 
 
 class TestAirAbsorptionSplit:

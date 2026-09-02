@@ -104,7 +104,6 @@ class DirectionalFDN(FDN):
         self._kronecker_matrix: NDArray | None = None
         self._base_feedback_matrix: NDArray | None = None
         self._scattering_matrices: list[NDArray] | None = None
-        self._use_scattering: bool = False
 
     # ==================================================================
     # High-level convenience
@@ -133,6 +132,14 @@ class DirectionalFDN(FDN):
             Type of base N×N feedback matrix.
         freqs
             Frequencies (Hz) for frequency-dependent absorption.
+        filter_order : int, optional
+            Ignored. Retained for API compatibility; absorption is now
+            designed as a graphic EQ (see :mod:`src.fdn.absorption_design`),
+            which takes no filter order or warping coefficient.
+        warp_factor : float, optional
+            Ignored. Retained for API compatibility; absorption is now
+            designed as a graphic EQ (see :mod:`src.fdn.absorption_design`),
+            which takes no filter order or warping coefficient.
         rng : np.random.Generator, optional
             Random generator for delay-length selection.
         """
@@ -243,8 +250,6 @@ class DirectionalFDN(FDN):
             Ambisonics RIR in ACN/SN3D format.
         """
         num_samples = int(length_seconds * self.sample_rate)
-        # Ensure length is a multiple of frame_size
-        num_samples = (num_samples // self.frame_size) * self.frame_size
 
         # Create impulse
         impulse = np.zeros((1, num_samples))
@@ -362,12 +367,10 @@ class DirectionalFDN(FDN):
         self._scattering_matrices = []
 
         if amount <= 0.0:
-            self._use_scattering = False
             for _ in range(self.num_delay_line_groups):
                 self._scattering_matrices.append(np.eye(Q))
             return
 
-        self._use_scattering = True
         rng = np.random.default_rng(
             self.seed + 9999 if self.seed is not None else None
         )

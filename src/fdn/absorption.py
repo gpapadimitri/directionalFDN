@@ -1,9 +1,12 @@
 """Absorption filters / gains for the FDN feedback loop.
 
-Two implementations are provided:
+Three implementations are provided:
 
-* :class:`AbsorptionGains` — frequency-independent scalar gains per delay line.
-* :class:`AbsorptionGEQ` — frequency-dependent graphic-EQ absorption (Schlecht and Habets).
+* :class:`AbsorptionGains` -- frequency-independent scalar gains per delay
+  line.
+* :class:`AbsorptionGEQ` -- frequency-dependent graphic-EQ absorption
+  (Schlecht and Habets).
+* :class:`AbsorptionSOS` -- absorption from pre-computed SOS cascades.
 """
 
 from __future__ import annotations
@@ -12,8 +15,8 @@ from abc import ABC, abstractmethod
 
 import numpy as np
 from numpy.typing import NDArray
-from scipy.signal import sosfilt
 from pyFDN import SOSFilterBank
+from scipy.signal import sosfilt
 
 from ..utils import db2lin
 from .absorption_design import design_absorption_sos
@@ -208,7 +211,8 @@ def create_absorption(
     des_t60_ms: float | NDArray,
     *,
     freqs: NDArray | None = None,
-    **_ignored: object,
+    filter_order: int | None = None,
+    warp_factor: float | None = None,
 ) -> Absorption:
     """Convenience factory that picks the right absorption type.
 

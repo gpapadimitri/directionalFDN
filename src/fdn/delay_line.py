@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import numpy as np
 from numpy.typing import NDArray
+from pyFDN import sample_delay_lengths
 
 from ..utils import ms_to_samps
-from pyFDN import sample_delay_lengths
 
 # ---------------------------------------------------------------------------
 # Delay-line lengths

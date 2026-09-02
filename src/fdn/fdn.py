@@ -18,8 +18,8 @@ from pyFDN import SOSFilterBank
 
 from .absorption import (
     Absorption,
-    AbsorptionGEQ,
     AbsorptionGains,
+    AbsorptionGEQ,
     AbsorptionSOS,
     create_absorption,
 )
@@ -137,9 +137,13 @@ class FDN:
         freqs : NDArray, optional
             Frequency points for frequency-dependent T60.
         filter_order : int, optional
-            IIR filter order (required when *des_t60_ms* is an array).
+            Ignored. Retained for API compatibility; absorption is now
+            designed as a graphic EQ (see :mod:`src.fdn.absorption_design`),
+            which takes no filter order or warping coefficient.
         warp_factor : float, optional
-            All-pass warp coefficient (required for frequency-dependent T60).
+            Ignored. Retained for API compatibility; absorption is now
+            designed as a graphic EQ (see :mod:`src.fdn.absorption_design`),
+            which takes no filter order or warping coefficient.
         """
         if self.delay_length_samps is None:
             raise RuntimeError("Initialise delay-line lengths first.")
@@ -189,11 +193,19 @@ class FDN:
         ``process_fdn`` applies its ``post_delay`` hook to the delay-line
         output, which is where this package applies absorption.  The hook only
         needs ``filter(block: (F, N)) -> (F, N)``.
+
+        The returned hook is built fresh on every call and carries no state
+        in: ``render_fdn`` allocates a fresh delay bank each call, so handing
+        back a filter object with live memory would leave the network
+        half-reset and make repeat renders differ.
         """
         if isinstance(self.absorption, AbsorptionGains):
             return ScalarGains(self.absorption._gains)
         if isinstance(self.absorption, AbsorptionGEQ):
-            return self.absorption._bank
+            # A fresh bank per render: render_fdn allocates a fresh delay bank
+            # each call, so carrying filter memory across calls would leave the
+            # network half-reset and make repeat renders differ.
+            return SOSFilterBank(self.absorption.sos, self.num_delay_lines)
         if isinstance(self.absorption, AbsorptionSOS):
             # AbsorptionSOS stores (N, sections, 6); pyFDN wants (sections, 6, N).
             return SOSFilterBank(
@@ -242,8 +254,13 @@ class FDN:
         The delay-line loop is vestigial for ``process``, which allocates a
         fresh delay bank per call through :func:`src.fdn.render.render_fdn`;
         it is kept because ``init_delay_lines`` and ``_check_ready`` still
-        expose those buffers.  Clearing the absorption filters is the part
-        that changes subsequent output.
+        expose those buffers.
+
+        ``process()`` now builds a fresh absorption filter bank on every
+        call (see :meth:`_absorption_hook`), so this no longer affects
+        subsequent ``process()`` output.  What it does reset is the
+        ``absorption`` object's own internal state, for callers that invoke
+        ``absorption.process()`` directly rather than through ``process()``.
         """
         if self.delay_lines is not None:
             for dl in self.delay_lines:

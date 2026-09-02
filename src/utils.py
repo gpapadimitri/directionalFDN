@@ -1,14 +1,14 @@
 from __future__ import annotations
 
-import numpy as np
-from numpy.typing import NDArray
 import matplotlib.pyplot as plt
-from scipy.fft import rfft, rfftfreq
-from scipy.signal import butter, sosfilt
+import numpy as np
 import pyfar as pf
+import pyFDN
+from numpy.typing import NDArray
 from pyrato.edc import energy_decay_curve_chu_lundeby, schroeder_integration
 from pyrato.parameters import reverberation_time_linear_regression
-import pyFDN
+from scipy.fft import rfft, rfftfreq
+from scipy.signal import butter, sosfilt
 
 
 def db(x: NDArray | float, is_squared: bool = False) -> NDArray:
@@ -293,12 +293,24 @@ def mixing_time_ms(ir: NDArray, fs: float, pre_delay: int = 0) -> float:
     """
     import warnings
 
+    # Coupled to pyFDN.echo_density's exact wording: this is the only way to
+    # distinguish "never reached threshold" from an ordinary 0.0 result, since
+    # echo_density reports both the same way otherwise. Any other warning it
+    # raises is re-emitted below rather than silently swallowed.
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         t_abel, _ = pyFDN.echo_density(
             np.asarray(ir).ravel(), n=1024, fs=fs, pre_delay=pre_delay
         )
-    if any("Mixing time not found" in str(w.message) for w in caught):
+    not_found = False
+    for w in caught:
+        if "Mixing time not found" in str(w.message):
+            not_found = True
+        else:
+            warnings.warn_explicit(
+                w.message, w.category, w.filename, w.lineno
+            )
+    if not_found:
         return float("nan")
     return float(t_abel)
 

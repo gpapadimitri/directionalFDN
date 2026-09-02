@@ -48,18 +48,15 @@ from dataclasses import dataclass
 
 import numpy as np
 from numpy.typing import NDArray
-
+from pyFDN import SOSFilterBank
 from scipy.linalg import hadamard
 
-from pyFDN import SOSFilterBank
-
+from ..utils import db2lin
 from . import spatial
 from .absorption_design import design_absorption_sos
 from .delay_line import generate_delay_lengths
 from .feedback_matrix import FeedbackMatrix, FeedbackMatrixType
 from .render import ScalarGains, render_fdn
-from ..utils import db2lin
-
 
 # Speed of sound constant (m/s) — used for air absorption and delay range
 _SPEED_OF_SOUND = 343.0
@@ -559,9 +556,13 @@ class PlaneWaveDFDN:
         freqs : NDArray, optional
             Frequency bands (Hz) — required when T60 is frequency-dependent.
         filter_order : int
-            IIR filter order for absorption.
+            Ignored. Retained for API compatibility; absorption is now
+            designed as a graphic EQ (see :mod:`src.fdn.absorption_design`),
+            which takes no filter order or warping coefficient.
         warp_factor : float
-            All-pass warping coefficient for Prony fitting.
+            Ignored. Retained for API compatibility; absorption is now
+            designed as a graphic EQ (see :mod:`src.fdn.absorption_design`),
+            which takes no filter order or warping coefficient.
         feedback_type : FeedbackMatrixType
             Type of base N×N feedback matrix.
         air_absorption : bool, optional
@@ -594,7 +595,7 @@ class PlaneWaveDFDN:
             )
         self._lambda_group = int(lambda_group)
 
-        N, F = self.num_delay_line_groups, self.frame_size
+        N = self.num_delay_line_groups
         Q = self.Q  # read AFTER grid init, since Q may have changed
 
         # 1. Delay-line lengths — independent per channel (ICASSP Sec. 3)
@@ -639,7 +640,13 @@ class PlaneWaveDFDN:
                 f"t60_per_direction_ms must be scalar, (n_bands,), (Q={Q},), "
                 f"or (Q={Q}, n_bands), got shape {t60.shape}."
             )
-        if freqs is None:
+        # Branch on the shape actually computed above, not on whether freqs
+        # was supplied: a (Q,) T60 is broadband-per-channel even when freqs
+        # is passed (see the branch above), so it must take the ScalarGains
+        # path regardless.
+        self.air_attenuation_db = None
+        self.boundary_attenuation_db = None
+        if t60_expanded.ndim == 1:
             # Broadband: one scalar gain per channel, round trip = m exactly.
             t60_s = np.maximum(t60_expanded, 1.0) * 1e-3
             gains = db2lin(-60.0 * all_lengths / (self.sample_rate * t60_s))
@@ -657,9 +664,7 @@ class PlaneWaveDFDN:
                     stacklevel=2,
                 )
         else:
-            t60_2d = np.atleast_2d(t60_expanded) * 1e-3
-            if t60_2d.shape[0] == 1:
-                t60_2d = np.repeat(t60_2d, N * Q, axis=0)
+            t60_2d = t60_expanded * 1e-3
             self.absorption_sos = design_absorption_sos(
                 t60_2d, freqs, all_lengths, self.sample_rate
             )
@@ -754,7 +759,7 @@ class PlaneWaveDFDN:
                 M_Q = H_Q
             else:
                 # Unitary interpolation via matrix log/exp
-                from scipy.linalg import logm, expm
+                from scipy.linalg import expm, logm
                 M_Q = np.real(expm(float(lateral_mix) * logm(H_Q)))
         self._kronecker_matrix = np.kron(self._base_feedback.matrix, M_Q)
         # Verify unitarity
@@ -862,8 +867,6 @@ class PlaneWaveDFDN:
             Ambisonics RIR in ACN/SN3D format.
         """
         num_samples = int(length_seconds * self.sample_rate)
-        F = self.frame_size
-        num_samples = (num_samples // F) * F
 
         impulse = np.zeros((1, num_samples))
         impulse[0, 0] = 1.0
@@ -948,7 +951,14 @@ class PlaneWaveDFDN:
             B,
             E @ c,
             D,
-            absorption=self.absorption,
+            # A fresh bank per render: render_fdn allocates a fresh delay bank
+            # each call, so carrying filter memory across calls would leave
+            # the network half-reset and make repeat renders differ.
+            absorption=(
+                SOSFilterBank(self.absorption_sos, NQ)
+                if self.absorption_sos is not None
+                else self.absorption
+            ),
         )
 
     # ==================================================================
