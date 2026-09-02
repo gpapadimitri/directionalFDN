@@ -87,13 +87,8 @@ class AbsorptionGains(Absorption):
             num_delay_lines, delay_line_lengths, sample_rate, frame_size, des_t60_ms
         )
         t60_s = float(des_t60_ms) * 1e-3
-        #a round trip is m+frame_size samples, not m, since block
-        #processing reinjects feedback one block after producing it.
-        #without this term the realised t60 runs long by ~(1+frame_size/m).
         self._gains: NDArray = db2lin(
-            -60.0
-            * (self.delay_line_lengths + self.frame_size)
-            / (self.sample_rate * t60_s)
+            -60.0 * self.delay_line_lengths / (self.sample_rate * t60_s)
         )
 
     def process(self, x: NDArray) -> NDArray:

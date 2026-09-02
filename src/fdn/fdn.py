@@ -14,10 +14,18 @@ from __future__ import annotations
 
 import numpy as np
 from numpy.typing import NDArray
+from pyFDN import SOSFilterBank
 
-from .absorption import Absorption, AbsorptionSOS, create_absorption
+from .absorption import (
+    Absorption,
+    AbsorptionGEQ,
+    AbsorptionGains,
+    AbsorptionSOS,
+    create_absorption,
+)
 from .delay_line import DelayLine
 from .feedback_matrix import FeedbackMatrix, FeedbackMatrixType
+from .render import ScalarGains, render_fdn
 
 
 class FDN:
@@ -175,6 +183,27 @@ class FDN:
     # Processing
     # ------------------------------------------------------------------
 
+    def _absorption_hook(self) -> object:
+        """Return the absorption as a ``process_fdn`` filter object.
+
+        ``process_fdn`` applies its ``post_delay`` hook to the delay-line
+        output, which is where this package applies absorption.  The hook only
+        needs ``filter(block: (F, N)) -> (F, N)``.
+        """
+        if isinstance(self.absorption, AbsorptionGains):
+            return ScalarGains(self.absorption._gains)
+        if isinstance(self.absorption, AbsorptionGEQ):
+            return self.absorption._bank
+        if isinstance(self.absorption, AbsorptionSOS):
+            # AbsorptionSOS stores (N, sections, 6); pyFDN wants (sections, 6, N).
+            return SOSFilterBank(
+                self.absorption.sos_coeffs.transpose(1, 2, 0), self.num_delay_lines
+            )
+        raise TypeError(
+            f"{type(self.absorption).__name__} is not supported by the pyFDN "
+            "recursion; use AbsorptionGains, AbsorptionGEQ or AbsorptionSOS."
+        )
+
     def process(self, input_data: NDArray) -> NDArray:
         """Run the FDN on *input_data* and return the output.
 
@@ -192,37 +221,15 @@ class FDN:
                 f"Expected {self.num_inputs} input channels, got {input_data.shape[0]}."
             )
 
-        N = self.num_delay_lines
-        F = self.frame_size
-        ir_len = input_data.shape[-1]
-
-        output = np.zeros((self.num_outputs, ir_len))
-        fb_out = np.zeros((N, F))
-        dl_out = np.zeros((N, F))
-
-        sample = 0
-        while sample + F <= ir_len:
-            idx = slice(sample, sample + F)
-            x = input_data[:, idx]
-
-            # Input mixing + feedback injection
-            dl_in = self.input_gains @ x + fb_out
-
-            # Delay-line read / write
-            for i in range(N):
-                dl_out[i] = self.delay_lines[i].read()
-                self.delay_lines[i].write(dl_in[i])
-
-            # Absorption → feedback
-            absorbed = self.absorption.process(dl_out)
-            fb_out = self.feedback.process(absorbed)
-
-            # Output mixing + direct path
-            output[:, idx] += self.output_gains @ absorbed + self.direct_gain @ x
-
-            sample += F
-
-        return output
+        return render_fdn(
+            input_data,
+            self.delay_length_samps,
+            self.feedback.matrix,
+            self.input_gains,
+            self.output_gains,
+            self.direct_gain,
+            absorption=self._absorption_hook(),
+        )
 
     # ------------------------------------------------------------------
     # State management

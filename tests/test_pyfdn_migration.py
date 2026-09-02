@@ -233,3 +233,67 @@ class TestRenderAdapter:
         single = render_fdn(x, delays, np.eye(3), np.ones((3, 1)),
                             np.ones((1, 3)), np.zeros((1, 1)), absorption=gains)
         assert single.shape == (1, 1)
+
+
+class TestFDNCorrectedLoop:
+    FS = 48000.0
+    DELAYS = np.array([1039, 1213, 1381, 1523, 1699, 1877, 2039, 2213])
+
+    def _make(self, t60_ms, freqs=None):
+        from src.fdn.fdn import FDN
+        from src.fdn.feedback_matrix import FeedbackMatrixType
+
+        fdn = FDN(self.FS, 1, 1, 8, 64, seed=42)
+        fdn.init_delay_line_lengths(self.DELAYS)
+        fdn.init_feedback_matrix(FeedbackMatrixType.HADAMARD)
+        fdn.init_absorption(t60_ms, freqs=freqs)
+        fdn.init_delay_lines()
+        fdn.init_io_gains(np.ones((8, 1)) / np.sqrt(8), np.ones((1, 8)) / np.sqrt(8))
+        fdn.init_direct_gain(np.zeros((1, 1)))
+        return fdn
+
+    def _impulse(self, seconds=4.0):
+        x = np.zeros((1, int(seconds * self.FS)))
+        x[0, 0] = 1.0
+        return x
+
+    def test_broadband_t60_is_accurate(self, measured_t60):
+        fdn = self._make(1500.0)
+        rt = measured_t60(fdn.process(self._impulse())[0], self.FS)
+        np.testing.assert_allclose(rt[1:], 1.5, rtol=0.05)
+
+    def test_frame_size_does_not_change_t60(self, measured_t60):
+        """The old loop's T60 depended on frame_size; the new one must not."""
+        from src.fdn.fdn import FDN
+        from src.fdn.feedback_matrix import FeedbackMatrixType
+
+        results = []
+        for frame in (32, 256):
+            fdn = FDN(self.FS, 1, 1, 8, frame, seed=42)
+            fdn.init_delay_line_lengths(self.DELAYS)
+            fdn.init_feedback_matrix(FeedbackMatrixType.HADAMARD)
+            fdn.init_absorption(1500.0)
+            fdn.init_delay_lines()
+            fdn.init_io_gains(
+                np.ones((8, 1)) / np.sqrt(8), np.ones((1, 8)) / np.sqrt(8)
+            )
+            fdn.init_direct_gain(np.zeros((1, 1)))
+            results.append(measured_t60(fdn.process(self._impulse())[0], self.FS))
+        np.testing.assert_allclose(results[0][1:], results[1][1:], rtol=1e-6)
+
+    def test_frequency_dependent_t60_is_accurate(self, measured_t60):
+        freqs = np.array([63.0, 125, 250, 500, 1000, 2000, 4000, 8000])
+        t60_ms = np.array([1.8, 1.7, 1.6, 1.4, 1.2, 1.0, 0.7, 0.45]) * 1e3
+
+        fdn = self._make(t60_ms, freqs=freqs)
+        rt = measured_t60(fdn.process(self._impulse())[0], self.FS)
+        target = t60_ms * 1e-3
+        # 62 Hz and 8 kHz bands sit at the edge of the design grid; check the middle.
+        np.testing.assert_allclose(rt[1:6], target[1:6], rtol=0.10)
+
+    def test_reset_clears_state(self):
+        fdn = self._make(1500.0)
+        fdn.process(self._impulse(0.5))
+        fdn.reset()
+        out = fdn.process(np.zeros((1, 4096)))
+        assert np.max(np.abs(out)) < 1e-12
