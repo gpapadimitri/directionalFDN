@@ -9,7 +9,6 @@ from pyrato.edc import energy_decay_curve_chu_lundeby
 from pyrato.parameters import reverberation_time_linear_regression
 from scipy.signal import butter, sosfilt
 
-
 #: Linear magnitude to decibels, and back.  Re-exported from pyFDN rather than
 #: reimplemented; both clamp instead of biasing, so they are exact inverses.
 lin2db = pyFDN.lin_to_db
@@ -143,7 +142,7 @@ def plot_edc(ir: NDArray, fs: float) -> None:
     bands, f_centre = pyFDN.octave_bands(fc=1000.0, start=-4, n=8, fs=fs)
     sos_bank = pyFDN.octave_band_filterbank(bands, fs)
     cmap = plt.cm.coolwarm(np.linspace(0, 1, len(f_centre)))
-    for i, (fc, sos) in enumerate(zip(f_centre, sos_bank)):
+    for i, (fc, sos) in enumerate(zip(f_centre, sos_bank, strict=True)):
         band_edc = pyFDN.edc(sosfilt(sos, ir))
         label = f"{fc:.0f} Hz" if fc < 1000 else f"{fc / 1000:.0f} kHz"
         ax.plot(t, _db(band_edc), color=cmap[i], linewidth=0.9, alpha=0.8, label=label)

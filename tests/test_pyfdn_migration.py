@@ -338,7 +338,7 @@ class TestDirectionalFDNCorrectedLoop:
 
         expected = dfdn._kronecker_matrix @ block_diag(
             *[T @ S for T, S in zip(dfdn.transform.transform_matrices,
-                                    dfdn._scattering_matrices)]
+                                    dfdn._scattering_matrices, strict=True)]
         )
         np.testing.assert_allclose(
             dfdn._effective_feedback_matrix(), expected, atol=1e-12
