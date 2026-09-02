@@ -691,3 +691,104 @@ class TestFeedbackMatrixFromPyFDN:
         from src.fdn.feedback_matrix import FeedbackMatrix
 
         assert not hasattr(FeedbackMatrix, "matrix_convolve")
+
+
+class TestDelayLengthSpread:
+    """Global spread across all N*Q lines, not per-sub-network coprimality.
+
+    A ``kron`` feedback matrix never mixes across the channel index, so it is
+    tempting to draw the N lengths of each channel as its own coprime FDN.
+    Measured, that is much worse: on an N=8, Q=86 grid it takes every one of
+    the 86 sub-networks from non-coprime to coprime but moves the composite
+    mixing time from 4.9 ms to 57 ms.  The audible output is the sum of all Q
+    sub-networks through the encoder, so what makes it dense is that all N*Q
+    lengths are distinct and spread -- the classic criterion applies to the
+    whole pool here, not to each sub-network.
+    """
+
+    FS = 48000.0
+
+    def _make(self, sh_order=3, groups=8):
+        from src.fdn.planewave_dfdn import PlaneWaveDFDN
+
+        pw = PlaneWaveDFDN(self.FS, groups, sh_order=sh_order, frame_size=64, seed=42)
+        pw.setup(delay_range_ms=(20.0, 60.0), t60_per_direction_ms=1500.0)
+        return pw
+
+    def test_all_lengths_are_distinct(self):
+        pw = self._make()
+        lengths = pw.delay_length_samps
+        assert len(np.unique(lengths)) == len(lengths)
+
+    def test_lengths_stay_in_range(self):
+        pw = self._make()
+        lo, hi = int(0.020 * self.FS), int(0.060 * self.FS)
+        assert np.all(pw.delay_length_samps >= lo)
+        assert np.all(pw.delay_length_samps <= hi)
+
+    def test_tail_mixes_soon_after_the_shortest_delay(self):
+        """The property the spread actually buys: an early mixing time.
+
+        Nothing can mix before the shortest delay line returns, so the bound is
+        relative to that rather than absolute.  Drawing per sub-network instead
+        pushes this well past 2x.
+        """
+        import pyFDN
+
+        pw = self._make()
+        w = pw.render(0.0, 0.0, 2.0, direct_gain=0.0, er_gain=0.0, reverb_gain=1.0)[0]
+        t_mix, _ = pyFDN.echo_density(w, fs=self.FS)
+        shortest_ms = pw.delay_length_samps.min() / self.FS * 1000.0
+        assert 0.0 < t_mix < 2.0 * shortest_ms
+
+    def test_reproducible(self):
+        np.testing.assert_array_equal(
+            self._make().delay_length_samps, self._make().delay_length_samps
+        )
+
+
+class TestLosslessnessChecks:
+    """Both directional classes verify the feedback matrix with pyFDN."""
+
+    FS = 48000.0
+
+    def test_planewave_kronecker_is_lossless(self):
+        import pyFDN
+
+        from src.fdn.planewave_dfdn import PlaneWaveDFDN
+
+        pw = PlaneWaveDFDN(self.FS, 4, sh_order=1, frame_size=64, seed=42)
+        pw.setup(delay_range_ms=(20.0, 60.0), t60_per_direction_ms=1500.0)
+        assert pyFDN.is_unilossless(pw._kronecker_matrix)
+
+    def test_directional_kronecker_is_lossless(self):
+        import pyFDN
+
+        from src.fdn.directional_fdn import DirectionalFDN
+
+        dfdn = DirectionalFDN(self.FS, 4, ambisonics_order=1, frame_size=64, seed=42)
+        dfdn.setup(delay_range_ms=(20.0, 60.0), des_t60_ms=1500.0)
+        assert pyFDN.is_unilossless(dfdn._kronecker_matrix)
+
+    @pytest.mark.xfail(
+        reason="pre-existing: lateral_mix's matrix-log interpolation "
+        "real(expm(t*logm(H_Q))) is orthogonal only when H_Q has no -1 "
+        "eigenvalues. Forcing det(H_Q)=+1 fixes odd Q (14, 42) but not "
+        "Hadamard sizes, where H is a symmetric involution with eigenvalues "
+        "{1,1,-1,-1} and no real principal log. Needs a real-Schur angle-scaling "
+        "construction; pyFDN.interpolate_orthogonal has the same limitation.",
+        raises=RuntimeError,
+        strict=True,
+    )
+    def test_lateral_mix_stays_lossless(self):
+        import pyFDN
+
+        from src.fdn.planewave_dfdn import PlaneWaveDFDN
+
+        pw = PlaneWaveDFDN(self.FS, 4, sh_order=1, frame_size=64, seed=42)
+        pw.setup(
+            delay_range_ms=(20.0, 60.0),
+            t60_per_direction_ms=1500.0,
+            lateral_mix=0.5,
+        )
+        assert pyFDN.is_unilossless(pw._kronecker_matrix)
