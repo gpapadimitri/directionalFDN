@@ -1043,3 +1043,173 @@ class TestHigherOrderReflections:
                           direct_gain=0.0, reverb_gain=0.0)[0]
             energy[order] = np.sum(w[: int(0.05 * self.FS)] ** 2)
         assert energy[3] > 1.5 * energy[1]
+
+
+class TestVBAP:
+    """Vector-base amplitude panning onto the plane-wave grid.
+
+    Alary and Politis (ICASSP 2020) pan the direct sound (Eq. 3) and every
+    early reflection (Eq. 4) onto the grid with VBAP, then encode the grid to
+    the output with E (Eq. 13).  Gains are normalised to sum to one so that
+    E @ g reproduces y(theta): the l=0 harmonic is constant over the sphere,
+    so its encoded value is (sum g) / sqrt(4 pi).
+    """
+
+    def _grid(self, sh_order=2):
+        from src.fdn import spatial
+
+        return spatial.quadrature_grid(sh_order)
+
+    def test_gains_are_nonnegative_and_sum_to_one(self):
+        from src.fdn.spatial import vbap_gains
+
+        az, el = self._grid()
+        for direction in [(0.0, 0.0), (1.3, 0.4), (-2.0, -0.8), (np.pi, 0.0)]:
+            g = vbap_gains(az, el, *direction)
+            assert np.all(g >= -1e-12)
+            assert g.sum() == pytest.approx(1.0)
+
+    def test_at_most_three_active_gains(self):
+        from src.fdn.spatial import vbap_gains
+
+        az, el = self._grid()
+        g = vbap_gains(az, el, 0.9, 0.2)
+        assert np.count_nonzero(g > 1e-9) <= 3
+
+    def test_a_grid_direction_pans_to_itself(self):
+        from src.fdn.spatial import vbap_gains
+
+        az, el = self._grid()
+        g = vbap_gains(az, el, float(az[5]), float(el[5]))
+        assert g[5] == pytest.approx(1.0, abs=1e-6)
+
+    def test_encoding_recovers_the_direction(self):
+        """E @ vbap(theta) must approximate y(theta) -- the paper's premise."""
+        from src.fdn import spatial
+
+        az, el = self._grid(sh_order=3)
+        Y = spatial.encode_directions(az, el, 1)          # E = Y^T per Eq. 13
+        for direction in [(0.0, 0.0), (1.3, 0.4), (-2.0, -0.5)]:
+            g = spatial.vbap_gains(az, el, *direction)
+            encoded = Y.T @ g
+            target = spatial.encode_direction(*direction, 1)
+            # W is exact by construction; the first-order axes are a
+            # three-point approximation on a finite grid.
+            assert encoded[0] == pytest.approx(target[0], rel=1e-9)
+            np.testing.assert_allclose(encoded[1:], target[1:], atol=0.06)
+
+    def test_rejects_a_degenerate_grid(self):
+        from src.fdn.spatial import vbap_gains
+
+        with pytest.raises(ValueError, match="at least 4"):
+            vbap_gains(np.array([0.0, 1.0]), np.array([0.0, 0.0]), 0.0, 0.0)
+
+
+class TestPaperFaithfulEncoding:
+    """One grid, one encoder -- Alary and Politis (ICASSP 2020) Eqs. 3, 11-13.
+
+    The paper puts the direct sound, the early reflections and the
+    recirculating signals all on the plane-wave grid, and encodes them with a
+    single matrix E = Y(L, U_grid).  Every path then shares one convention, so
+    their relative levels do not depend on the grid size.
+    """
+
+    FS = 48000.0
+    FREQS = np.array([125.0, 250, 500, 1000, 2000, 4000, 8000])
+    T60 = np.array([0.9, 1.0, 1.1, 1.0, 0.8, 0.7, 0.6])
+
+    def _make(self, sh_order=2, **kw):
+        from src.fdn.planewave_dfdn import PlaneWaveDFDN
+
+        pw = PlaneWaveDFDN(self.FS, 8, sh_order=sh_order, output_sh_order=1,
+                           frame_size=64, seed=42, **kw)
+        pw.setup(delay_range_ms=(20.0, 60.0), t60_per_direction_ms=1000.0)
+        return pw
+
+    def test_encoder_is_the_plain_sh_matrix(self):
+        """Eq. 13: E = Y(L, U_grid), with no quadrature scaling."""
+        from src.fdn import spatial
+
+        pw = self._make()
+        Y = spatial.encode_directions(
+            pw.grid_azimuths, pw.grid_elevations, pw.output_sh_order
+        )
+        np.testing.assert_allclose(pw._encoding_matrix, Y.T, atol=1e-12)
+
+    def test_one_grid_channel_encodes_to_its_own_direction(self):
+        from src.fdn import spatial
+
+        pw = self._make()
+        q = 5
+        s = np.zeros(pw.Q)
+        s[q] = 1.0
+        expected = spatial.encode_direction(
+            float(pw.grid_azimuths[q]), float(pw.grid_elevations[q]),
+            pw.output_sh_order,
+        )
+        np.testing.assert_allclose(pw._encoding_matrix @ s, expected, atol=1e-12)
+
+    def test_direct_sound_is_panned_onto_the_grid(self):
+        """Eq. 3: d = vbap(U_grid, (phi, theta)), then encoded by E."""
+        from src.fdn import spatial
+
+        pw = self._make()
+        az, el = 0.8, 0.3
+        d = pw._build_direct_gain(az, el)
+        assert d.shape == (pw.Q, 1)
+        assert np.count_nonzero(d > 1e-9) <= 3
+        encoded = (pw._encoding_matrix @ d).ravel()
+        target = spatial.encode_direction(az, el, pw.output_sh_order)
+        assert encoded[0] == pytest.approx(target[0], rel=1e-9)
+        np.testing.assert_allclose(encoded[1:], target[1:], atol=0.1)
+
+    def test_drr_no_longer_depends_on_grid_size(self):
+        """The leak this fixes: sh_order changed DRR by 7.3 dB."""
+        from src.fdn.planewave_dfdn import PlaneWaveDFDN, shoebox_reflections
+
+        room, src, rec = (10.0, 8.0, 4.0), (3.0, 7.0, 1.5), (8.0, 2.0, 1.5)
+        dist = float(np.linalg.norm(np.array(src) - np.array(rec)))
+        refl = shoebox_reflections(room=room, source=src, receiver=rec,
+                                   sample_rate=self.FS, t60_broadband_s=0.825)
+        drrs = []
+        for sh in (1, 2, 3):
+            pw = PlaneWaveDFDN(self.FS, 8, sh_order=sh, output_sh_order=1,
+                               frame_size=64, seed=42)
+            pw.setup(delay_range_ms=(20.0, 60.0), t60_per_direction_ms=1000.0)
+            pw.set_early_reflections(refl)
+            w = pw.render(0.0, 0.0, 2.0, direct_gain=1.0 / dist,
+                          reverb_gain=0.8)[0]
+            drrs.append(10 * np.log10(w[0] ** 2 / np.sum(w[1:] ** 2)))
+        assert max(drrs) - min(drrs) < 2.0
+
+    def test_reflections_pass_through_the_absorption_filter(self):
+        """Eq. 12: s' joins group lambda after the delay, so G_lambda shapes it.
+
+        A reflection alone must therefore come out darker than it went in.
+        """
+        from src.fdn.planewave_dfdn import PlaneWaveDFDN, Reflection
+
+        pw = PlaneWaveDFDN(self.FS, 8, sh_order=2, output_sh_order=1,
+                           frame_size=64, seed=42)
+        pw.setup(delay_range_ms=(20.0, 60.0),
+                 t60_per_direction_ms=np.tile(self.T60 * 1e3, (1, 1))[0],
+                 freqs=self.FREQS)
+        pw.set_early_reflections(
+            [Reflection(gain=1.0, azimuth=0.0, elevation=0.0, delay_samples=500)]
+        )
+        w = pw.render(0.0, 0.0, 1.0, direct_gain=0.0, reverb_gain=0.0)[0]
+        assert np.max(np.abs(w[400:700])) > 1e-6      # the reflection arrives
+        assert np.count_nonzero(np.abs(w[400:700]) > 1e-9) > 1   # and is filtered
+
+    def test_reflections_still_excite_the_late_field(self):
+        from src.fdn.planewave_dfdn import PlaneWaveDFDN, Reflection
+
+        pw = PlaneWaveDFDN(self.FS, 8, sh_order=2, output_sh_order=1,
+                           frame_size=64, seed=42)
+        pw.setup(delay_range_ms=(20.0, 60.0), t60_per_direction_ms=1000.0)
+        pw.set_early_reflections(
+            [Reflection(gain=0.5, azimuth=0.0, elevation=0.0, delay_samples=200)]
+        )
+        w = pw.render(0.0, 0.0, 1.0, direct_gain=0.0, reverb_gain=0.0)[0]
+        assert np.sum(w[:200] ** 2) == pytest.approx(0.0, abs=1e-20)
+        assert np.sum(w[5000:] ** 2) > 1e-10

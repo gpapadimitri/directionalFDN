@@ -118,3 +118,82 @@ def quadrature_grid(order: int) -> tuple[NDArray, NDArray]:
         raise ValueError(f"quadrature_grid requires order >= 1, got {order}")
     coords = spharpy.samplings.t_design(n_max=2 * order)
     return np.asarray(coords.azimuth), np.asarray(coords.elevation)
+
+
+def _unit_vectors(azimuths: NDArray, elevations: NDArray) -> NDArray:
+    """Cartesian unit vectors for spherical angles, shape ``(n, 3)``."""
+    azimuths = np.asarray(azimuths, dtype=float).ravel()
+    elevations = np.asarray(elevations, dtype=float).ravel()
+    cos_el = np.cos(elevations)
+    return np.column_stack(
+        (cos_el * np.cos(azimuths), cos_el * np.sin(azimuths), np.sin(elevations))
+    )
+
+
+def vbap_gains(
+    grid_azimuths: NDArray,
+    grid_elevations: NDArray,
+    azimuth: float,
+    elevation: float,
+) -> NDArray:
+    """Vector-base amplitude panning of one direction onto a spherical grid.
+
+    Finds the triangle of grid points enclosing the direction and solves for
+    the three non-negative gains whose weighted sum points at it (Pulkki 1997).
+    All other gains are zero.
+
+    Alary and Politis (ICASSP 2020) use this for the direct sound (Eq. 3) and
+    for every early reflection (Eq. 4), so that those signals live on the same
+    plane-wave grid as the recirculating ones and reach the output through the
+    single encoding matrix ``E`` of Eq. 13.
+
+    Gains are normalised to **sum** to one rather than to unit norm.  The
+    zeroth harmonic is constant over the sphere, so ``E @ g`` reproduces its
+    value exactly only when the gains sum to one; unit-norm gains would make
+    the encoded level depend on where between grid points the direction falls.
+
+    Parameters
+    ----------
+    grid_azimuths, grid_elevations : NDArray, shape (Q,)
+        Grid directions in radians.  At least four, not all coplanar.
+    azimuth, elevation : float
+        Direction to pan, in radians.
+
+    Returns
+    -------
+    NDArray, shape (Q,)
+        Non-negative gains summing to one, at most three of them non-zero.
+    """
+    from scipy.spatial import ConvexHull
+
+    grid = _unit_vectors(grid_azimuths, grid_elevations)
+    if grid.shape[0] < 4:
+        raise ValueError(
+            f"VBAP needs at least 4 grid directions, got {grid.shape[0]}."
+        )
+    target = _unit_vectors(np.array([azimuth]), np.array([elevation]))[0]
+
+    # The grid lies on the unit sphere, so its convex hull triangulates it.
+    hull = ConvexHull(grid)
+    best_gains: NDArray | None = None
+    best_margin = -np.inf
+    for triplet in hull.simplices:
+        try:
+            gains = np.linalg.solve(grid[triplet].T, target)
+        except np.linalg.LinAlgError:  # pragma: no cover - degenerate triangle
+            continue
+        margin = float(np.min(gains))
+        if margin > best_margin:
+            best_margin, best_gains = margin, (triplet, gains)
+        if margin >= 0.0:
+            break
+
+    triplet, gains = best_gains
+    gains = np.maximum(gains, 0.0)
+    total = gains.sum()
+    if total <= 0.0:  # pragma: no cover - target opposite every triangle
+        raise ValueError("VBAP found no enclosing triangle for this direction.")
+
+    out = np.zeros(grid.shape[0])
+    out[triplet] = gains / total
+    return out

@@ -583,6 +583,48 @@ class EarlyReflectionModule:
 # Plane-Wave DFDN
 # ---------------------------------------------------------------------------
 
+class _EarlyReflectionInjection:
+    """Adds the early reflections to delay-line group lambda after its delay.
+
+    Alary and Politis (ICASSP 2020) Eq. 12::
+
+        s_i = s'(z) + Z_i(z)[sum_j A_ij G_j s_j],   i = lambda
+
+    The reflections join the group's *post-delay* state, so the ``l_r`` offsets
+    already carried by ``s'`` set their arrival times, and they then pass
+    through the absorption filter ``G_lambda`` and the output matrix
+    ``C_lambda`` exactly like the recirculating signals -- and recirculate
+    through ``A`` as well.  One injection point serves both purposes, where an
+    input-side injection would delay them by a whole delay line and a separate
+    output tap would let them bypass the absorption.
+
+    ``process_fdn`` applies its ``post_delay`` hook to the delay-line output,
+    which is precisely that point, and calls it once per block in order, so the
+    running position below stays aligned with the render.
+    """
+
+    def __init__(
+        self,
+        absorption: object,
+        er_grid: NDArray,
+        lambda_group: int,
+        num_channels: int,
+    ) -> None:
+        self._absorption = absorption
+        self._er = er_grid
+        self._slice = slice(lambda_group * num_channels,
+                            (lambda_group + 1) * num_channels)
+        self._position = 0
+
+    def filter(self, block: NDArray) -> NDArray:
+        block = np.array(block, dtype=float, copy=True)
+        n = block.shape[0]
+        segment = self._er[:, self._position : self._position + n]
+        block[: segment.shape[1], self._slice] += segment.T
+        self._position += n
+        return self._absorption.filter(block)
+
+
 class PlaneWaveDFDN:
     """Frequency-Dependent Directional FDN (ICASSP 2020).
 
@@ -881,31 +923,23 @@ class PlaneWaveDFDN:
     # ==================================================================
 
     def _init_ambisonics_encoding(self) -> None:
-        """Build Ambisonics encoding matrix E.
+        """Build the Ambisonics encoding matrix E of Eq. 13.
 
-        Shape: ((L_out+1)², Q) — maps Q grid signals to Ambisonics.
+        ``E = Y(L, U_grid)``: the real spherical harmonics of the grid
+        directions, with no quadrature scaling.  Under this convention a grid
+        channel of amplitude ``s`` encodes to ``s * y(theta_q)`` exactly, so the
+        direct sound, the early reflections and the recirculating signals --
+        all of which live on the grid -- share one level convention and their
+        balance does not shift with the grid size.
 
-        With a t-design grid of degree 2L and SN3D normalisation,
-        ``(4π/Q) Yᵀ Y = diag(1/(2l+1))`` (NOT identity).  We use
-        ``E = Yᵀ · √(4π/Q)``, which is the SN3D plane-wave-decomposition
-        encoder: it preserves total energy under the spatially-white
-        (isotropic) assumption that matches the late reverb's grid
-        statistics.  IMPORTANT: this encoder does NOT reproduce a
-        unit-amplitude single plane wave from a single grid point—that
-        requires the ``(2l+1)`` per-degree compensation applied in the
-        ER path (see :meth:`_build_er_grid_signal`).  Do not 'fix' the
-        SN3D scaling here without also revisiting that path.
-
-        No SH-order truncation compensation is applied: when
-        ``output_sh_order < sh_order`` the higher-order spatial detail
-        is discarded; boosting only the reverb path would break the
-        balance with the direct and early-reflection paths.
+        Shape ``((L_out+1)^2, Q)``.  No compensation is applied when
+        ``output_sh_order < sh_order``: the higher-order spatial detail is
+        discarded, and boosting only the reverb path would break that balance.
         """
-        # Y matrix: (Q, (L_out+1)²) in SN3D — uses output_sh_order
         Y = spatial.encode_directions(
             self.grid_azimuths, self.grid_elevations, self.output_sh_order
         )
-        self._encoding_matrix = Y.T * np.sqrt(4.0 * np.pi / self.Q)  # ((L_out+1)², Q)
+        self._encoding_matrix = Y.T  # ((L_out+1)^2, Q)
 
     # ==================================================================
     # Kronecker feedback
@@ -976,20 +1010,20 @@ class PlaneWaveDFDN:
     def _build_direct_gain(
         self, source_azimuth: float, source_elevation: float,
     ) -> NDArray:
-        """Build direct-path gain vector in Ambisonics domain.
+        """Direct path panned onto the grid, per Eq. 3.
 
-        Returns the unit-amplitude SH encoding of the source direction.
-        Direct-to-reverberant ratio is controlled by the user-supplied
-        ``direct_gain`` and ``reverb_gain`` knobs at render time, not by
-        an implicit ``1/√N`` factor (which would silently couple DRR to
-        the number of delay-line groups).
+        ``d = vbap(U_grid, (phi, theta))``.  The direct sound joins the grid
+        like every other signal and reaches the output through ``E``, so it
+        needs no separate spherical-harmonic convention of its own.
 
-        Returns shape ((L+1)², 1).
+        Returns shape ``(Q, 1)``.  Absolute level stays with the caller's
+        ``direct_gain``; nothing here divides by the number of delay lines.
         """
-        y_src = spatial.encode_direction(
-            source_azimuth, source_elevation, self.output_sh_order,
-        )  # ((L_out+1)²,)
-        return y_src.reshape(-1, 1)
+        gains = spatial.vbap_gains(
+            self.grid_azimuths, self.grid_elevations,
+            source_azimuth, source_elevation,
+        )
+        return gains.reshape(-1, 1)
 
     # ==================================================================
     # Output encoding
@@ -1112,39 +1146,32 @@ class PlaneWaveDFDN:
         )                                            # (n_out, 1)
         E = self._encoding_matrix                    # (n_out, Q)
 
-        # Early reflections are a precomputed, time-varying grid signal.
-        # process_fdn only takes static B and D, so they ride in as Q extra
-        # input channels: routed into delay-line group lambda by B, and tapped
-        # straight to the output through the encoder by D.  This reproduces
-        # dl_in = b x + er_grid and y = E (c s + er_grid) + d x exactly.
+        # Eq. 11: y' = sum_i C_i G_i s_i + d x, then y = E y'.  Everything
+        # lives on the grid, so E is the only encoder in the signal path.
+        absorption = (
+            SOSFilterBank(self.absorption_sos, NQ)
+            if self.absorption_sos is not None
+            else self.absorption
+        )
         if self._early_reflections is not None:
-            er_grid = self._build_er_grid_signal(input_data, ir_len, er_gain)
-            X = np.vstack([input_data, er_grid])                      # (1+Q, len)
-            B = np.zeros((NQ, 1 + Q))
-            B[:, 0:1] = b
-            lam_s = self._lambda_group * Q
-            B[lam_s : lam_s + Q, 1:] = np.eye(Q)
-            D = np.zeros((self.num_outputs, 1 + Q))
-            D[:, 0:1] = d
-            D[:, 1:] = E
-        else:
-            X, B, D = input_data, b, d
+            # Eq. 12: the reflections replace this group's input injection and
+            # join its state after the delay, so they are wrapped around the
+            # absorption hook rather than routed through B and D.
+            absorption = _EarlyReflectionInjection(
+                absorption,
+                self._build_er_grid_signal(input_data, ir_len, er_gain),
+                self._lambda_group,
+                Q,
+            )
 
         return render_fdn(
-            X,
+            input_data,
             self.delay_length_samps,
             self._kronecker_matrix,
-            B,
+            b,
             E @ c,
-            D,
-            # A fresh bank per render: render_fdn allocates a fresh delay bank
-            # each call, so carrying filter memory across calls would leave
-            # the network half-reset and make repeat renders differ.
-            absorption=(
-                SOSFilterBank(self.absorption_sos, NQ)
-                if self.absorption_sos is not None
-                else self.absorption
-            ),
+            E @ d,
+            absorption=absorption,
         )
 
     # ==================================================================
@@ -1154,59 +1181,38 @@ class PlaneWaveDFDN:
     def _build_er_grid_signal(
         self, input_data: NDArray, ir_len: int, er_gain: float = 1.0,
     ) -> NDArray:
-        """Pre-compute the early-reflection signal on the plane-wave grid.
+        """Early-reflection signal on the plane-wave grid, per Eqs. 4-5.
 
-        For each reflection, decomposes a plane wave from its direction
-        onto the Q-point grid using
-        ``w[q] = (4π/Q) · Y_grid(q) · Y(az,el)``,
-        the dual of the encoder ``E = Y_grid^T · √(4π/Q)``.  When this
-        grid signal later passes through ``E``, it reconstructs a true
-        plane wave in the SH output with amplitude equal to ``ref.gain``
-        (wall reflectivity × 1/r), matching the direct-path convention
-        ``d = Y(az_src, el_src) · direct_gain``.
+        Each reflection is panned onto the grid with VBAP and delayed by its
+        own ``l_r``::
 
-        Returns shape (Q, ir_len) — added to ``grid_output`` inside the
-        render loop.
+            lambda_r = lambda_r * vbap(U_grid, (phi_r, theta_r))
+            s'_r(n + l_r) = lambda_r x(n)
+            s'(n) = sum_r s'_r(n)
+
+        No spherical-harmonic compensation is involved: the reflections live on
+        the grid alongside the recirculating signals and are encoded by the
+        same ``E``.  A reflection carrying per-band gains contributes a short
+        filtered arrival instead of a bare impulse, its group delay removed so
+        the geometry still sets the arrival time.
+
+        Returns shape ``(Q, ir_len)``.
         """
         er_buf = np.zeros((self.Q, ir_len))
-
         if self._early_reflections is None:
             return er_buf
-
-        # SH basis evaluated on the grid at output_sh_order (same order
-        # as E, since anything above L_out is annihilated by E anyway).
-        Y_grid = spatial.encode_directions(
-            self.grid_azimuths, self.grid_elevations, self.output_sh_order,
-        )  # (Q, (L_out+1)²)
-        # Calibrate the plane-wave decomposition so that (E @ w) == y_dir.
-        # With (4π/Q) Yᵀ Y = diag(1/(2l+1)) and E = Yᵀ √(4π/Q):
-        #     E @ w = √(Q/(4π)) · diag(1/(2l+1)) · (comp · y_dir)
-        # so we need ``comp[lm] = (2l+1) · √(4π/Q)``.
-        comp_factor = np.sqrt(4.0 * np.pi / self.Q)
-        comp = np.zeros((Y_grid.shape[1],))
-        idx_sh = 0
-        for l in range(self.output_sh_order + 1):
-            n = 2 * l + 1
-            comp[idx_sh:idx_sh + n] = (2 * l + 1) * comp_factor
-            idx_sh += n
 
         for ref in self._early_reflections.reflections:
             l_r = ref.delay_samples
             if l_r >= ir_len:
                 continue
-            y_dir = spatial.encode_direction(
-                ref.azimuth, ref.elevation, self.output_sh_order,
-            )  # ((L_out+1)²,)
-            weights = Y_grid @ (comp * y_dir)  # (Q,)
-
-            # A reflection carrying per-band gains is not a bare impulse: wall
-            # and air loss shape it, so it arrives as a short filtered
-            # response.  firwin2 gives a linear-phase FIR from the magnitudes;
-            # its group delay is compensated so the arrival time is unchanged.
+            weights = spatial.vbap_gains(
+                self.grid_azimuths, self.grid_elevations,
+                ref.azimuth, ref.elevation,
+            )
             if ref.band_gains is not None:
                 taps = _reflection_fir(ref, self.sample_rate)
-                offset = (taps.size - 1) // 2
-                start = max(0, l_r - offset)
+                start = max(0, l_r - (taps.size - 1) // 2)
                 signal = np.convolve(input_data[0], taps)[: ir_len - start]
             else:
                 start = l_r
