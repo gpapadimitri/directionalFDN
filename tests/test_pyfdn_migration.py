@@ -937,3 +937,109 @@ class TestHelpersComeFromPyFDN:
         from src import utils
 
         assert not hasattr(utils, "db")
+
+
+class TestHigherOrderReflections:
+    """Image sources beyond first order, with per-band wall and air loss.
+
+    A shoebox has 4n^2+2 images at reflection order n, so 6, 18, 38, 66 for
+    orders 1 to 4.  First order alone leaves the 0-50 ms window nearly empty,
+    which is what makes the individual arrivals stand out.
+    """
+
+    FS = 48000.0
+    ROOM = (10.0, 8.0, 4.0)
+    SRC = (3.0, 7.0, 1.5)
+    REC = (8.0, 2.0, 1.5)
+    FREQS = np.array([125.0, 250, 500, 1000, 2000, 4000, 8000, 16000])
+    T60 = np.array([0.9, 1.0, 1.1, 1.0, 0.8, 0.7, 0.6, 0.5])
+
+    def _refl(self, **kw):
+        from src.fdn.planewave_dfdn import shoebox_reflections
+
+        args = dict(room=self.ROOM, source=self.SRC, receiver=self.REC,
+                    sample_rate=self.FS, t60_broadband_s=0.825)
+        args.update(kw)
+        return shoebox_reflections(**args)
+
+    def test_default_is_still_first_order(self):
+        assert len(self._refl()) == 6
+
+    @pytest.mark.parametrize("order,expected", [(1, 6), (2, 24), (3, 62), (4, 128)])
+    def test_image_counts_follow_4n2_plus_2(self, order, expected):
+        """Cumulative count is sum of 4n^2+2 over n = 1..order."""
+        assert len(self._refl(order=order)) == expected
+
+    def test_sorted_by_arrival(self):
+        delays = [r.delay_samples for r in self._refl(order=3)]
+        assert delays == sorted(delays)
+
+    def test_higher_orders_are_quieter(self):
+        """More wall bounces and a longer path must both cost amplitude."""
+        first = self._refl(order=1)
+        third = self._refl(order=3)
+        assert max(r.gain for r in third[-10:]) < min(r.gain for r in first)
+
+    def test_no_band_gains_without_freqs(self):
+        """Backward compatible: a broadband call behaves exactly as before."""
+        for r in self._refl(order=2):
+            assert r.band_gains is None
+
+    def test_band_gains_populated_with_freqs(self):
+        refl = self._refl(order=2, freqs=self.FREQS, t60_per_band_s=self.T60)
+        for r in refl:
+            assert r.band_gains is not None
+            assert r.band_gains.shape == self.FREQS.shape
+            assert np.all(r.band_gains > 0.0)
+
+    def test_air_absorption_darkens_reflections(self):
+        """HF must be attenuated relative to LF, and more so on longer paths."""
+        refl = self._refl(order=2, freqs=self.FREQS, t60_per_band_s=self.T60,
+                          air_absorption=True)
+        by_path = sorted(refl, key=lambda r: r.delay_samples)
+        near, far = by_path[0], by_path[-1]
+        tilt = lambda r: r.band_gains[-1] / r.band_gains[0]  # noqa: E731
+        assert tilt(near) < 1.0
+        assert tilt(far) < tilt(near)
+
+    def test_air_absorption_can_be_disabled(self):
+        wet = self._refl(order=1, freqs=self.FREQS, t60_per_band_s=self.T60,
+                         air_absorption=True)
+        dry = self._refl(order=1, freqs=self.FREQS, t60_per_band_s=self.T60,
+                         air_absorption=False)
+        assert wet[-1].band_gains[-1] < dry[-1].band_gains[-1]
+
+    def test_frequency_dependent_wall_loss(self):
+        """A T60 curve that falls with frequency must darken the walls too."""
+        refl = self._refl(order=1, freqs=self.FREQS, t60_per_band_s=self.T60,
+                          air_absorption=False)
+        assert refl[0].band_gains[-1] < refl[0].band_gains[0]
+
+    def test_band_gains_render_as_a_filtered_arrival(self):
+        """With band gains a reflection is a short impulse response, not a spike."""
+        from src.fdn.planewave_dfdn import PlaneWaveDFDN
+
+        pw = PlaneWaveDFDN(self.FS, 4, sh_order=1, frame_size=64, seed=42)
+        pw.setup(delay_range_ms=(20.0, 60.0), t60_per_direction_ms=1000.0)
+        pw.set_early_reflections(
+            self._refl(order=1, freqs=self.FREQS, t60_per_band_s=self.T60)
+        )
+        w = pw.render(0.0, 0.0, length_seconds=0.5,
+                      direct_gain=0.0, reverb_gain=0.0)[0]
+        first = min(r.delay_samples for r in
+                    self._refl(order=1, freqs=self.FREQS, t60_per_band_s=self.T60))
+        window = w[first - 40 : first + 40]
+        assert np.count_nonzero(np.abs(window) > 1e-6) > 1
+
+    def test_higher_order_fills_the_early_window(self):
+        from src.fdn.planewave_dfdn import PlaneWaveDFDN
+
+        energy = {}
+        for order in (1, 3):
+            pw = PlaneWaveDFDN(self.FS, 4, sh_order=1, frame_size=64, seed=42)
+            pw.setup(delay_range_ms=(20.0, 60.0), t60_per_direction_ms=1000.0)
+            pw.set_early_reflections(self._refl(order=order))
+            w = pw.render(0.0, 0.0, length_seconds=0.5,
+                          direct_gain=0.0, reverb_gain=0.0)[0]
+            energy[order] = np.sum(w[: int(0.05 * self.FS)] ** 2)
+        assert energy[3] > 1.5 * energy[1]

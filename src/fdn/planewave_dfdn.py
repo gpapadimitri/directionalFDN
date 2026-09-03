@@ -307,11 +307,94 @@ def delay_range_from_room(
 
 @dataclass
 class Reflection:
-    """One early reflection with its gain, direction, and delay."""
+    """One early reflection: where it comes from, when, and how loud.
+
+    ``gain`` is the broadband amplitude, always populated.  ``band_gains``, when
+    present, carries the same quantity resolved per frequency -- wall loss, air
+    loss and the 1/r spread combined -- and supersedes ``gain`` at render time,
+    where the reflection becomes a short filtered arrival rather than a single
+    sample.
+    """
+
     gain: float
     azimuth: float      # radians
     elevation: float    # radians
-    delay_samples: int  # l_r — tap-in offset into the delay lines
+    delay_samples: int  # l_r -- tap-in offset into the delay lines
+    order: int = 1      # number of wall bounces
+    band_gains: NDArray | None = None   # (n_bands,) linear amplitude
+    freqs: NDArray | None = None        # (n_bands,) Hz, matching band_gains
+
+
+def _wall_reflectivity(
+    room: tuple[float, float, float],
+    t60_s: NDArray,
+    model: str = "eyring",
+) -> NDArray:
+    """Pressure reflection coefficient implied by a reverberation time.
+
+    Inverts Sabine or Eyring for the average absorption coefficient, so the
+    early reflections lose energy at the same rate the late field does.
+    Accepts a scalar or a per-band array and returns the matching shape.
+    """
+    import warnings
+
+    lx, ly, lz = room
+    volume = lx * ly * lz
+    surface = 2.0 * (lx * ly + ly * lz + lx * lz)
+    t60_s = np.asarray(t60_s, dtype=float)
+
+    if model == "eyring":
+        alpha = 1.0 - np.exp(-0.161 * volume / (surface * t60_s))
+    elif model == "sabine":
+        alpha = 0.161 * volume / (surface * t60_s)
+    else:
+        raise ValueError(f"Unknown model {model!r}; use 'eyring' or 'sabine'.")
+
+    if np.any(alpha >= 1.0):
+        warnings.warn(
+            f"Derived absorption reaches {float(np.max(alpha)):.3f} >= 1 for "
+            f"V={volume:.1f} m3, S={surface:.1f} m2; the requested T60 is too "
+            "long for this room. Clipping to 0.999.",
+            RuntimeWarning,
+            stacklevel=3,
+        )
+        alpha = np.minimum(alpha, 0.999)
+    return np.sqrt(np.maximum(0.0, 1.0 - alpha))
+
+
+def _image_sources(
+    room: tuple[float, float, float],
+    source: tuple[float, float, float],
+    order: int,
+) -> list[tuple[tuple[float, float, float], int]]:
+    """Enumerate shoebox image sources up to *order* reflections.
+
+    Uses the Allen and Berkley indexing: along each axis an image sits at
+    ``2*m*L + (1-2q)*s`` for integer ``m`` and parity ``q``, having bounced
+    ``|m - q|`` times off the wall at 0 and ``|m|`` times off the wall at L.
+    The reflection order is the sum of those counts over the three axes, which
+    yields the expected ``4n^2 + 2`` images at order ``n``.
+
+    Returns ``(position, order)`` pairs, excluding the direct path.
+    """
+    from itertools import product
+
+    span = order + 1
+    images: list[tuple[tuple[float, float, float], int]] = []
+    for mx, my, mz in product(range(-span, span + 1), repeat=3):
+        for qx, qy, qz in product((0, 1), repeat=3):
+            position = []
+            total = 0
+            for m, q, s, length in (
+                (mx, qx, source[0], room[0]),
+                (my, qy, source[1], room[1]),
+                (mz, qz, source[2], room[2]),
+            ):
+                position.append(2 * m * length + (1 - 2 * q) * s)
+                total += abs(m - q) + abs(m)
+            if 0 < total <= order:
+                images.append((tuple(position), total))
+    return images
 
 
 def shoebox_reflections(
@@ -320,126 +403,150 @@ def shoebox_reflections(
     receiver: tuple[float, float, float],
     sample_rate: float,
     t60_broadband_s: float,
-    speed_of_sound: float = 343.0,
-    alpha_per_wall: tuple[float, float, float, float, float, float] | None = None,
+    speed_of_sound: float = _SPEED_OF_SOUND,
     model: str = "eyring",
+    *,
+    order: int = 1,
+    freqs: NDArray | None = None,
+    t60_per_band_s: NDArray | None = None,
+    air_absorption: bool = True,
+    temperature_c: float = 20.0,
+    humidity_percent: float = 50.0,
+    pressure_kpa: float = 101.325,
 ) -> list[Reflection]:
-    """Compute first-order image-source reflections for a shoebox room.
+    """Image-source early reflections for a shoebox room.
 
-    Returns 6 :class:`Reflection` objects (one per wall), sorted by
-    arrival time, suitable for :meth:`PlaneWaveDFDN.set_early_reflections`.
+    Returns :class:`Reflection` objects sorted by arrival time, ready for
+    :meth:`PlaneWaveDFDN.set_early_reflections`.  A shoebox has ``4n^2 + 2``
+    images at reflection order *n*, so the returned count is 6, 24, 62 or 128
+    for ``order`` 1 to 4.
 
-    The pressure reflection coefficient is derived from the broadband T60
-    via Sabine's formula, so the ER gains are physically consistent with
-    the late-reverb absorption:
-
-    .. math::
-        \\alpha = \\frac{0.161\\,V}{S\\,T_{60}}, \\qquad
-        r_{\\text{wall}} = \\sqrt{1 - \\alpha}
-
-    where *S* is the total wall area and *V* the room volume.
+    Wall loss comes from inverting Eyring (or Sabine) on the supplied
+    reverberation time, so the early field decays at the same rate as the late
+    one.  Supplying *freqs* and *t60_per_band_s* resolves that per band and
+    populates :attr:`Reflection.band_gains`, at which point each reflection
+    renders as a short filtered arrival rather than a bare impulse.
 
     Parameters
     ----------
     room : (Lx, Ly, Lz)
         Room dimensions in metres.
-    source : (sx, sy, sz)
-        Source position in metres.
-    receiver : (rx, ry, rz)
-        Receiver position in metres.
+    source, receiver : (x, y, z)
+        Positions in metres.
     sample_rate : float
-        Sample rate (Hz) — used to convert distances to delay_samples.
+        Sample rate in Hz, used to convert arrival times to samples.
     t60_broadband_s : float
-        Broadband reverberation time in seconds.  Used to derive the
-        wall pressure reflection coefficient via Sabine's formula.
+        Broadband reverberation time, used for the broadband ``gain`` and as
+        the fallback when *t60_per_band_s* is not given.
     speed_of_sound : float
-        Speed of sound in m/s.
+        Propagation speed in m/s.
+    model : str
+        ``"eyring"`` (default) or ``"sabine"`` for the absorption inversion.
+    order : int
+        Maximum reflection order.  First order alone leaves the first tens of
+        milliseconds nearly empty, which is what makes individual arrivals
+        stand out; order 2 to 3 fills it.
+    freqs : NDArray, optional
+        Frequencies in Hz for the per-band treatment.  Requires
+        *t60_per_band_s*.
+    t60_per_band_s : NDArray, optional
+        Reverberation time per band, in seconds, giving frequency-dependent
+        wall loss.
+    air_absorption : bool
+        Apply ISO 9613-1 atmospheric loss over each reflection's own path
+        length.  Only meaningful per band, so it is ignored without *freqs*.
+    temperature_c, humidity_percent, pressure_kpa : float
+        Atmospheric conditions.
 
     Returns
     -------
     list[Reflection]
-        Six first-order reflections sorted by delay (earliest first).
+        Sorted by arrival time, earliest first.
     """
-    import warnings
+    receiver_arr = np.asarray(receiver, dtype=float)
+    direct_distance = max(
+        float(np.linalg.norm(np.asarray(source, dtype=float) - receiver_arr)), 1e-6
+    )
 
-    Lx, Ly, Lz = room
-    sx, sy, sz = source
-    rx, ry, rz = receiver
-
-    # Derive wall reflectivity from T60.  Default: Eyring inversion
-    # (α = 1 − exp(−0.161 V/(S T60))), which stays physical for high
-    # absorption.  Sabine (α = 0.161 V/(S T60)) is available for legacy
-    # parity but warns / clips when α ≥ 1.
-    if alpha_per_wall is None:
-        V = Lx * Ly * Lz
-        S = 2.0 * (Lx * Ly + Ly * Lz + Lx * Lz)
-        if model == "eyring":
-            alpha = 1.0 - np.exp(-0.161 * V / (S * t60_broadband_s))
-        elif model == "sabine":
-            alpha = 0.161 * V / (S * t60_broadband_s)
-        else:
-            raise ValueError(f"Unknown model {model!r}; use 'eyring' or 'sabine'.")
-        if alpha >= 1.0:
-            warnings.warn(
-                f"Derived α={alpha:.3f} ≥ 1 (T60={t60_broadband_s:.2f}s is "
-                f"too long for room volume V={V:.1f} m³, S={S:.1f} m²). "
-                "Clipping to 0.999.",
-                RuntimeWarning,
-                stacklevel=2,
+    per_band = freqs is not None and t60_per_band_s is not None
+    if per_band:
+        freqs = np.asarray(freqs, dtype=float)
+        r_wall_band = _wall_reflectivity(room, t60_per_band_s, model)
+        alpha_air = (
+            air_absorption_db_per_meter(
+                freqs,
+                temperature_c=temperature_c,
+                humidity_percent=humidity_percent,
+                pressure_kpa=pressure_kpa,
             )
-            alpha = 0.999
-        alpha_per_wall = (alpha,) * 6
-    if len(alpha_per_wall) != 6:
-        raise ValueError("alpha_per_wall must have 6 entries (one per wall).")
-    refl = tuple(float(np.sqrt(max(0.0, 1.0 - a))) for a in alpha_per_wall)
-
-    # Image sources: mirror the source across each wall
-    image_sources = [
-        ((-sx, sy, sz),       refl[0]),   # x = 0
-        ((2*Lx - sx, sy, sz), refl[1]),   # x = Lx
-        ((sx, -sy, sz),       refl[2]),   # y = 0
-        ((sx, 2*Ly - sy, sz), refl[3]),   # y = Ly
-        ((sx, sy, -sz),       refl[4]),   # z = 0 (floor)
-        ((sx, sy, 2*Lz - sz), refl[5]),   # z = Lz (ceiling)
-    ]
-
-    # Direct-sound distance (for gain normalisation)
-    d_direct = np.sqrt((sx - rx)**2 + (sy - ry)**2 + (sz - rz)**2)
-    d_direct = max(d_direct, 1e-6)
+            if air_absorption
+            else np.zeros_like(freqs)
+        )
+    r_wall = float(_wall_reflectivity(room, t60_broadband_s, model))
 
     reflections: list[Reflection] = []
-    for (ix, iy, iz), r in image_sources:
-        dx = ix - rx
-        dy = iy - ry
-        dz = iz - rz
-        dist = np.sqrt(dx**2 + dy**2 + dz**2)
-        dist = max(dist, 1e-6)
+    for position, reflection_order in _image_sources(room, source, order):
+        offset = np.asarray(position, dtype=float) - receiver_arr
+        distance = max(float(np.linalg.norm(offset)), 1e-6)
 
-        # Gain: wall reflectivity × absolute inverse-distance law (1/r).
-        # Using absolute amplitude (not normalised to d_direct) keeps ref.gain
-        # on the same scale as direct_gain = 1/d_direct, so that the ER/direct
-        # amplitude ratio is r_wall × d_direct/dist — the physically correct
-        # image-source value.
-        gain = r / dist
+        band_gains = None
+        if per_band:
+            # Wall loss compounds once per bounce; air loss accrues over the
+            # whole path the reflection actually travelled.
+            band_gains = (
+                r_wall_band**reflection_order
+                * db2lin(-alpha_air * distance)
+                / distance
+            )
 
-        # Direction from receiver to image source
-        azimuth = float(np.arctan2(dy, dx))
-        elevation = float(np.arctan2(dz, np.sqrt(dx**2 + dy**2)))
+        reflections.append(
+            Reflection(
+                gain=r_wall**reflection_order / distance,
+                azimuth=float(np.arctan2(offset[1], offset[0])),
+                elevation=float(
+                    np.arctan2(offset[2], np.hypot(offset[0], offset[1]))
+                ),
+                delay_samples=max(
+                    1,
+                    int(
+                        round(
+                            (distance - direct_distance)
+                            / speed_of_sound
+                            * sample_rate
+                        )
+                    ),
+                ),
+                order=reflection_order,
+                band_gains=band_gains,
+                freqs=freqs if per_band else None,
+            )
+        )
 
-        # Delay relative to direct sound
-        delay_s = (dist - d_direct) / speed_of_sound
-        delay_samples = max(1, int(np.round(delay_s * sample_rate)))
-
-        reflections.append(Reflection(
-            gain=gain,
-            azimuth=azimuth,
-            elevation=elevation,
-            delay_samples=delay_samples,
-        ))
-
-    # Sort by arrival time
     reflections.sort(key=lambda r: r.delay_samples)
     return reflections
+
+
+def _reflection_fir(
+    reflection: Reflection, sample_rate: float, num_taps: int = 63
+) -> NDArray:
+    """Linear-phase FIR realising a reflection's per-band magnitude.
+
+    ``firwin2`` needs the gain specified from DC to Nyquist, so the band edges
+    are held flat outside the supplied range.  The result is symmetric, with a
+    group delay of ``(num_taps - 1) / 2`` samples that the caller removes so
+    the reflection still arrives when the geometry says it should.
+    """
+    from scipy.signal import firwin2
+
+    freqs = np.asarray(reflection.freqs, dtype=float)
+    gains = np.asarray(reflection.band_gains, dtype=float)
+    nyquist = sample_rate / 2.0
+
+    inside = freqs < nyquist
+    freqs, gains = freqs[inside], gains[inside]
+    grid = np.concatenate(([0.0], freqs, [nyquist]))
+    values = np.concatenate(([gains[0]], gains, [gains[-1]]))
+    return firwin2(num_taps, grid / nyquist, values)
 
 
 class EarlyReflectionModule:
@@ -1087,14 +1194,26 @@ class PlaneWaveDFDN:
             l_r = ref.delay_samples
             if l_r >= ir_len:
                 continue
-            end = ir_len - l_r
             y_dir = spatial.encode_direction(
                 ref.azimuth, ref.elevation, self.output_sh_order,
             )  # ((L_out+1)²,)
             weights = Y_grid @ (comp * y_dir)  # (Q,)
-            er_buf[:, l_r:l_r + end] += (
-                ref.gain * er_gain * weights[:, np.newaxis]
-                * input_data[0:1, :end]
+
+            # A reflection carrying per-band gains is not a bare impulse: wall
+            # and air loss shape it, so it arrives as a short filtered
+            # response.  firwin2 gives a linear-phase FIR from the magnitudes;
+            # its group delay is compensated so the arrival time is unchanged.
+            if ref.band_gains is not None:
+                taps = _reflection_fir(ref, self.sample_rate)
+                offset = (taps.size - 1) // 2
+                start = max(0, l_r - offset)
+                signal = np.convolve(input_data[0], taps)[: ir_len - start]
+            else:
+                start = l_r
+                signal = ref.gain * input_data[0, : ir_len - start]
+
+            er_buf[:, start : start + signal.size] += (
+                er_gain * weights[:, np.newaxis] * signal[np.newaxis, :]
             )
 
         return er_buf
