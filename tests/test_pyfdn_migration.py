@@ -1213,3 +1213,125 @@ class TestPaperFaithfulEncoding:
         w = pw.render(0.0, 0.0, 1.0, direct_gain=0.0, reverb_gain=0.0)[0]
         assert np.sum(w[:200] ** 2) == pytest.approx(0.0, abs=1e-20)
         assert np.sum(w[5000:] ** 2) > 1e-10
+
+
+class TestDirectionalFDNAgainstJAES2019:
+    """Alary, Politis, Schlecht and Valimaki, JAES 67(10), 2019.
+
+    Grounds DirectionalFDN in the paper it implements.  Verified as already
+    correct and left alone: Eq. 20 (A kron I_Q), Eq. 21 (block-diagonal T),
+    Eq. 16 (base absorption from T60_max), Eqs. 24-26 (directional gain), and
+    the ordering of Eq. 23 -- the paper applies T before g, which commutes
+    because g is one scalar per group.
+    """
+
+    FS = 48000.0
+
+    def test_direct_gain_is_the_sh_encoding_of_the_direction(self):
+        """Eq. 11: d = y(phi_0, theta_0), with no dependence on N.
+
+        A 1/N factor made the direct sound drop 6 dB per doubling of the
+        delay-line group count.
+        """
+        from src.fdn.directional_fdn import DirectionalFDN
+        from src.fdn.spatial import encode_direction
+
+        expected = encode_direction(0.0, 0.0, 1)[0]
+        for groups in (4, 8, 16):
+            dfdn = DirectionalFDN(self.FS, groups, ambisonics_order=1,
+                                  frame_size=64, seed=0)
+            dfdn.setup(delay_range_ms=(20.0, 60.0), des_t60_ms=1000.0)
+            rir = dfdn.render(0.0, 0.0, length_seconds=0.2)
+            assert rir[0, 0] == pytest.approx(expected, rel=1e-9)
+
+    def test_weighting_effective_order(self):
+        """Sec 3.2: L' is the order holding 95% of the weighting's energy.
+
+        Sampled over a sphere, as the paper specifies -- a ring of constant
+        elevation is rank deficient in the SH basis and reports nonsense.
+        """
+        from src.fdn import spatial
+        from src.fdn.transform import weighting_effective_order
+
+        az, el = spatial.uniform_directions(64)
+        assert weighting_effective_order(np.ones(64), az, el) == 0
+        dipole = 1.0 + 0.9 * np.cos(az) * np.cos(el)
+        assert weighting_effective_order(dipole, az, el) >= 1
+        # A realistic decay weighting is dominated by its mean, so L' = 0 and
+        # the order-2L grid quadrature_grid() builds is already adequate.
+        decay = np.where(np.cos(az) > 0, 0.999, 0.997)
+        assert weighting_effective_order(decay, az, el) == 0
+
+    def test_transform_does_not_add_energy(self):
+        """Sec 2.4: the transform must not inject energy, or the loop grows."""
+        from src.fdn import spatial
+        from src.fdn.transform import DirectionalWeighting
+
+        az, el = spatial.uniform_directions(64)
+        t60 = np.where(np.cos(az) > 0, 2.0, 0.6) * 1e3
+        dwm = DirectionalWeighting(4, 2, np.array([1039, 1213, 1381, 1523]),
+                                   self.FS, t60, az, el)
+        for T in dwm.transform_matrices:
+            assert np.max(np.abs(np.linalg.eigvals(T))) <= 1.0 + 1e-9
+
+    def test_warns_on_a_degenerate_sampling(self):
+        """Sec 3.1 samples over a sphere; a ring spans only part of the basis.
+
+        The channels a ring misses are exactly the ones null_complement passes
+        through unweighted, so those directions get no decay control at all.
+        """
+        from src.fdn.transform import DirectionalWeighting
+
+        az = np.linspace(0, 2 * np.pi, 12, endpoint=False)
+        el = np.zeros(12)                     # a ring, not a sphere
+        t60 = np.where(np.cos(az) > 0, 2.0, 0.6) * 1e3
+        with pytest.warns(RuntimeWarning, match="span only"):
+            DirectionalWeighting(2, 1, np.array([1039, 1213]), self.FS,
+                                 t60, az, el)
+
+    def test_a_spherical_sampling_does_not_warn(self):
+        import warnings as _warnings
+
+        from src.fdn import spatial
+        from src.fdn.transform import DirectionalWeighting
+
+        az, el = spatial.uniform_directions(64)
+        t60 = np.where(np.cos(az) > 0, 2.0, 0.6) * 1e3
+        with _warnings.catch_warnings():
+            _warnings.simplefilter("error", RuntimeWarning)
+            DirectionalWeighting(2, 1, np.array([1039, 1213]), self.FS,
+                                 t60, az, el)
+
+    def test_anisotropy_is_realised(self):
+        """Fig. 3: the realised directional decay tracks the target."""
+        import pyFDN
+
+        from src.fdn import spatial
+        from src.fdn.directional_fdn import DirectionalFDN
+
+        order = 2
+        # Sec 3.1 samples T60 "using a uniform set of points on a sphere, such
+        # as spherical t-designs of high degrees (t >= 20)".  A sparse grid
+        # cannot carry a sharp target: the per-line weighting is g_lin**m, so a
+        # long delay raises the directional function to a high power and
+        # sharpens it, pushing L' up with it.
+        az, el = spatial.quadrature_grid(10)
+        t60 = np.where(np.cos(az) > 0, 2.0, 0.6) * 1e3
+        dfdn = DirectionalFDN(self.FS, 8, ambisonics_order=order,
+                              frame_size=64, seed=42)
+        dfdn.setup(delay_range_ms=(20.0, 60.0), des_t60_ms=1500.0)
+        dfdn.set_directional_decay(t60, az, el)
+        rir = dfdn.render(0.0, 0.0, length_seconds=6.0)
+
+        def beam_t60(direction):
+            y = spatial.encode_direction(direction, 0.0, order)
+            e = pyFDN.edc(y @ rir)
+            e = e[e > 0]
+            db = 10 * np.log10(e / e[0])
+            i0, i1 = np.argmax(db < -5), np.argmax(db < -35)
+            t = np.arange(i1 - i0) / self.FS
+            return -60 / np.polyfit(t, db[i0:i1] - db[i0], 1)[0]
+
+        assert beam_t60(0.0) > 1.7               # front stays long
+        assert beam_t60(np.pi) < 0.9             # back decays fast
+        assert beam_t60(0.0) > 3.0 * beam_t60(np.pi)

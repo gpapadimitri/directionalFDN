@@ -301,18 +301,17 @@ class DirectionalFDN(FDN):
         if input_data.shape[0] != 1:
             raise ValueError("Input must be mono (1 channel).")
 
-        N = self.num_delay_line_groups
-
         src_enc = spatial.encode_direction(
             source_azimuth, source_elevation, self.ambisonics_order
         )
         b = self._build_input_gains(src_enc, directional=use_directional_input)
         c = self._build_output_gains()
 
-        # Direct-path gain d -- encodes source direction per Eq. 11:
-        #   d = y(phi_0, theta_0)  (SH encoding of the source direction).
-        # The 1/N factor matches the combined input/output gain (1/sqrt(N))^2.
-        direct_gain = src_enc.reshape(self.num_outputs, 1) / N
+        # Direct-path gain, Eq. 11: d = y(phi_0, theta_0), the plain SH
+        # encoding of the source direction.  No 1/N -- the paper sets d from
+        # the incident direction alone, and dividing by the group count would
+        # drop the direct sound 6 dB every time N doubled.
+        direct_gain = src_enc.reshape(self.num_outputs, 1)
 
         return render_fdn(
             input_data,
