@@ -55,7 +55,12 @@ from ..utils import db2lin
 from . import spatial
 from .absorption_design import design_absorption_sos
 from .delay_line import generate_delay_lengths
-from .feedback_matrix import FeedbackMatrix, FeedbackMatrixType
+from .feedback_matrix import (
+    FeedbackMatrix,
+    FeedbackMatrixType,
+    interpolate_to_orthogonal,
+    is_reflection,
+)
 from .render import ScalarGains, render_fdn
 
 # Speed of sound constant (m/s) — used for air absorption and delay range
@@ -948,14 +953,20 @@ class PlaneWaveDFDN:
     def _init_kronecker_feedback(
         self, matrix_type: FeedbackMatrixType, lateral_mix: float = 0.0,
     ) -> None:
-        """Build A ⊗ M_Q feedback.
+        """Build the ``A kron M_Q`` feedback matrix.
 
-        ``M_Q = exp(lateral_mix · log H_Q)`` interpolates unitarily
-        between the identity (``lateral_mix=0``, paper-faithful) and the
-        Q×Q normalised Hadamard / random-orthogonal matrix
-        (``lateral_mix=1``).  ``lateral_mix=0`` preserves per-direction
-        T60 exactly (no inter-direction coupling); larger values diffuse
-        directional energy at the cost of directional T60 accuracy.
+        ``lateral_mix`` interpolates ``M_Q`` from the identity to a full mixing
+        matrix.  Zero is the ICASSP 2020 formulation, ``A kron I_Q``, where a
+        channel only ever meets itself and each direction keeps its own T60
+        exactly.  One mixes every direction into every other on each
+        recirculation, trading directional accuracy for diffusion.
+
+        The interpolation goes through :func:`interpolate_to_orthogonal`, which
+        scales the rotation angles of the real Schur form.  The matrix
+        logarithm cannot be used here: a normalised Hadamard matrix is a
+        symmetric involution with eigenvalues at -1, whose principal logarithm
+        is complex, so ``real(expm(t * logm(H_Q)))`` leaves SO(n) and the
+        feedback stops being lossless.
         """
         self._base_feedback = FeedbackMatrix(
             self.num_delay_line_groups,
@@ -964,6 +975,7 @@ class PlaneWaveDFDN:
             seed=self.seed,
         )
         Q = self.Q
+
         if lateral_mix <= 0.0:
             M_Q = np.eye(Q)
         else:
@@ -973,24 +985,21 @@ class PlaneWaveDFDN:
                 rng = np.random.default_rng(
                     self.seed + 7777 if self.seed is not None else None
                 )
-                M = rng.standard_normal((Q, Q))
-                H_Q, _ = np.linalg.qr(M)
-            if lateral_mix >= 1.0:
-                M_Q = H_Q
-            else:
-                # Unitary interpolation via matrix log/exp
-                from scipy.linalg import expm, logm
-                M_Q = np.real(expm(float(lateral_mix) * logm(H_Q)))
+                H_Q, _ = np.linalg.qr(rng.standard_normal((Q, Q)))
+            # Only SO(n) is reachable from the identity by a continuous path,
+            # so a reflection target is turned into a rotation first.  The
+            # flipped column changes which full-mixing matrix we land on, not
+            # whether the result mixes fully.
+            if is_reflection(H_Q):
+                H_Q = H_Q.copy()
+                H_Q[:, 0] *= -1.0
+            M_Q = interpolate_to_orthogonal(H_Q, float(lateral_mix))
+
         self._kronecker_matrix = np.kron(self._base_feedback.matrix, M_Q)
-        # Verify unitarity
-        NQ = self.total_delay_lines
-        err = np.linalg.norm(
-            self._kronecker_matrix.T @ self._kronecker_matrix - np.eye(NQ),
-            "fro",
-        )
-        if err > 1e-8:
+        if not FeedbackMatrix.is_unitary(self._kronecker_matrix, tol=1e-8):
             raise RuntimeError(
-                f"Kronecker feedback matrix unitarity error: {err:.2e}"
+                "Kronecker feedback matrix is not lossless; the recursion "
+                "would not preserve energy."
             )
 
     # ==================================================================

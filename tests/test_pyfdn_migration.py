@@ -815,17 +815,8 @@ class TestLosslessnessChecks:
         dfdn.setup(delay_range_ms=(20.0, 60.0), des_t60_ms=1500.0)
         assert pyFDN.is_unilossless(dfdn._kronecker_matrix)
 
-    @pytest.mark.xfail(
-        reason="pre-existing: lateral_mix's matrix-log interpolation "
-        "real(expm(t*logm(H_Q))) is orthogonal only when H_Q has no -1 "
-        "eigenvalues. Forcing det(H_Q)=+1 fixes odd Q (14, 42) but not "
-        "Hadamard sizes, where H is a symmetric involution with eigenvalues "
-        "{1,1,-1,-1} and no real principal log. Needs a real-Schur angle-scaling "
-        "construction; pyFDN.interpolate_orthogonal has the same limitation.",
-        raises=RuntimeError,
-        strict=True,
-    )
     def test_lateral_mix_stays_lossless(self):
+        """Fixed: the matrix-log construction left SO(n) on Hadamard sizes."""
         import pyFDN
 
         from src.fdn.planewave_dfdn import PlaneWaveDFDN
@@ -1335,3 +1326,108 @@ class TestDirectionalFDNAgainstJAES2019:
         assert beam_t60(0.0) > 1.7               # front stays long
         assert beam_t60(np.pi) < 0.9             # back decays fast
         assert beam_t60(0.0) > 3.0 * beam_t60(np.pi)
+
+
+class TestLateralMix:
+    """Unitary interpolation between no inter-direction mixing and full mixing.
+
+    The old construction, ``real(expm(t * logm(H_Q)))``, is orthogonal only when
+    ``H_Q`` has no eigenvalue at -1: the principal logarithm of -1 is complex,
+    and taking the real part of the exponential then leaves SO(n).  Hadamard
+    matrices are symmetric involutions with eigenvalues {+1, -1}, so they hit
+    that case squarely.  Scaling the rotation angles of the real Schur form
+    stays on the manifold for every target and every t.
+    """
+
+    FS = 48000.0
+
+    @pytest.mark.parametrize("size", [2, 4, 8, 14, 42])
+    @pytest.mark.parametrize("t", [0.0, 0.25, 0.5, 0.75, 1.0])
+    def test_interpolation_stays_orthogonal(self, size, t):
+        from scipy.linalg import hadamard
+
+        from src.fdn.feedback_matrix import interpolate_to_orthogonal
+
+        if size & (size - 1) == 0:
+            target = hadamard(size) / np.sqrt(size)
+        else:
+            target = np.linalg.qr(
+                np.random.default_rng(size).standard_normal((size, size))
+            )[0]
+        target = _with_positive_determinant(target)
+        M = interpolate_to_orthogonal(target, t)
+        np.testing.assert_allclose(M.T @ M, np.eye(size), atol=1e-10)
+
+    def test_endpoints(self):
+        from scipy.linalg import hadamard
+
+        from src.fdn.feedback_matrix import interpolate_to_orthogonal
+
+        target = _with_positive_determinant(hadamard(8) / np.sqrt(8))
+        np.testing.assert_allclose(
+            interpolate_to_orthogonal(target, 0.0), np.eye(8), atol=1e-10
+        )
+        np.testing.assert_allclose(
+            interpolate_to_orthogonal(target, 1.0), target, atol=1e-10
+        )
+
+    def test_rejects_a_reflection(self):
+        """det = -1 has no continuous path from the identity within SO(n)."""
+        from src.fdn.feedback_matrix import interpolate_to_orthogonal
+
+        reflection = np.diag([1.0, 1.0, 1.0, -1.0])
+        with pytest.raises(ValueError, match="determinant"):
+            interpolate_to_orthogonal(reflection, 0.5)
+
+    @pytest.mark.parametrize("lateral_mix", [0.0, 0.25, 0.5, 1.0])
+    def test_planewave_dfdn_accepts_lateral_mix(self, lateral_mix):
+        import pyFDN
+
+        from src.fdn.planewave_dfdn import PlaneWaveDFDN
+
+        pw = PlaneWaveDFDN(self.FS, 4, sh_order=1, frame_size=64, seed=42)
+        pw.setup(delay_range_ms=(20.0, 60.0), t60_per_direction_ms=1500.0,
+                 lateral_mix=lateral_mix)
+        assert pyFDN.is_unilossless(pw._kronecker_matrix)
+
+    def test_mixing_diffuses_across_directions(self):
+        """lateral_mix=0 keeps channels independent; raising it couples them."""
+        from src.fdn.planewave_dfdn import PlaneWaveDFDN
+
+        blocks = {}
+        for mix in (0.0, 1.0):
+            pw = PlaneWaveDFDN(self.FS, 4, sh_order=1, frame_size=64, seed=42)
+            pw.setup(delay_range_ms=(20.0, 60.0), t60_per_direction_ms=1500.0,
+                     lateral_mix=mix)
+            Q = pw.Q
+            blocks[mix] = pw._kronecker_matrix[:Q, :Q]
+        # The leading Q x Q block is A[0,0] * M_Q, so its off-diagonal energy
+        # is exactly the inter-direction coupling.  Masking beats subtracting
+        # two sums, which cancels to rounding noise rather than to zero.
+        def off(block):
+            return float(np.sum(block[~np.eye(block.shape[0], dtype=bool)] ** 2))
+
+        assert off(blocks[0.0]) == pytest.approx(0.0, abs=1e-24)
+        assert off(blocks[1.0]) > 1e-6
+
+    def test_decay_survives_full_mixing(self):
+        pw_kwargs = dict(delay_range_ms=(20.0, 60.0), t60_per_direction_ms=1500.0)
+        from src.fdn.planewave_dfdn import PlaneWaveDFDN
+
+        pw = PlaneWaveDFDN(self.FS, 4, sh_order=1, frame_size=64, seed=42)
+        pw.setup(lateral_mix=1.0, **pw_kwargs)
+        w = pw.render(0.0, 0.0, 2.0, direct_gain=0.0, reverb_gain=1.0)[0]
+        assert np.all(np.isfinite(w))
+        first = np.sum(w[: len(w) // 4] ** 2)
+        last = np.sum(w[-len(w) // 4 :] ** 2)
+        assert first > last                      # it decays, not grows
+
+
+def _with_positive_determinant(matrix: np.ndarray) -> np.ndarray:
+    """Flip one column if needed so the matrix lies in SO(n)."""
+    from src.fdn.feedback_matrix import is_reflection
+
+    if is_reflection(matrix):
+        matrix = matrix.copy()
+        matrix[:, 0] *= -1
+    return matrix
