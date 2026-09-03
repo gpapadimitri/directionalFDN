@@ -520,66 +520,111 @@ class TestPlaneWaveDFDNCorrectedLoop:
         np.testing.assert_allclose(first, second, atol=1e-12)
 
 
-class TestAirAbsorptionSplit:
-    """The medium/boundary attribution from commit 0554ddd must survive."""
+class TestAirAbsorption:
+    """Air absorption enters through the T60 target, the standardized route.
+
+    No FDN implementation in this lineage models a propagation medium:
+    fdnToolbox's absorptionGEQ/onePoleAbsorption/firstOrderAbsorption,
+    artificial-audio/pyFDN's equivalents, and the DAFx24 tutorial's own
+    absorption_filter all take reverberation time and delay lengths and
+    nothing else.  The canonical place for the medium is therefore the target
+    itself -- the 4mV term of Sabine/Eyring,
+    ``T60 = 0.161 V / (S alpha + 4 m V)``, which is algebraically the same as
+    summing decay rates, ``1/T = 1/T_boundary + 1/T_air``.
+    """
 
     FS = 48000.0
     FREQS = np.array([63.0, 125, 250, 500, 1000, 2000, 4000, 8000])
     DELAYS = np.array([1039, 1213, 1381, 1523])
+    T60 = np.array([1.8, 1.7, 1.6, 1.4, 1.2, 1.0, 0.7, 0.45])
 
-    def test_shares_sum_to_required_attenuation(self):
-        from src.fdn.planewave_dfdn import air_absorption_split
+    def test_air_only_t60_falls_with_frequency(self):
+        from src.fdn.planewave_dfdn import air_absorption_t60
 
-        t60 = np.tile(np.array([1.8, 1.7, 1.6, 1.4, 1.2, 1.0, 0.7, 0.45]), (4, 1))
+        t_air = air_absorption_t60(self.FREQS)
+        assert np.all(np.diff(t_air) < 0.0)
+        # 16 kHz at 20 C / 50% RH is around half a second in air alone.
+        assert 0.3 < air_absorption_t60(np.array([16000.0]))[0] < 0.7
+
+    def test_air_limited_target_matches_the_sabine_4mv_term(self):
+        """The rate sum must equal the textbook air term, not merely resemble it."""
+        from src.fdn.planewave_dfdn import (
+            air_absorption_db_per_meter,
+            air_limited_t60,
+        )
+
+        volume, surface, alpha_boundary = 320.0, 304.0, 0.1857
+        sabine_dry = 0.161 * volume / (surface * alpha_boundary)
+        m = air_absorption_db_per_meter(self.FREQS) / (10 * np.log10(np.e))
+        sabine_with_air = 0.161 * volume / (surface * alpha_boundary + 4 * m * volume)
+
+        combined = air_limited_t60(np.full(self.FREQS.size, sabine_dry), self.FREQS)
+        np.testing.assert_allclose(combined, sabine_with_air, rtol=1e-3)
+
+    def test_air_can_only_shorten(self):
+        from src.fdn.planewave_dfdn import air_limited_t60
+
+        limited = air_limited_t60(self.T60, self.FREQS)
+        assert np.all(limited <= self.T60)
+        assert limited[-1] < self.T60[-1]          # 8 kHz is measurably shorter
+        assert limited[0] == pytest.approx(self.T60[0], rel=5e-3)   # 63 Hz barely
+
+    def test_shares_sum_to_the_required_attenuation(self):
+        """air_db and boundary_db must account for the realised round trip."""
+        from src.fdn.planewave_dfdn import air_absorption_split, air_limited_t60
+
+        t60 = np.tile(self.T60, (4, 1))
         air, boundary = air_absorption_split(t60, self.FREQS, self.DELAYS, self.FS)
-        required = 60.0 * self.DELAYS[:, None] / (self.FS * t60)
-        np.testing.assert_allclose(air + boundary, required, rtol=1e-12)
+        realised = air_limited_t60(t60, self.FREQS)
+        required = 60.0 * self.DELAYS[:, None] / (self.FS * realised)
+        np.testing.assert_allclose(air + boundary, required, rtol=1e-10)
 
-    def test_air_share_grows_with_frequency(self):
+    def test_both_shares_are_positive(self):
+        """The old model could produce a negative boundary share; this cannot."""
         from src.fdn.planewave_dfdn import air_absorption_split
 
-        t60 = np.tile(np.full(8, 1.5), (4, 1))
-        air, _ = air_absorption_split(t60, self.FREQS, self.DELAYS, self.FS)
-        assert np.all(np.diff(air[0]) > 0.0)
+        t60 = np.tile(np.full(8, 60.0), (4, 1))    # absurdly long target
+        air, boundary = air_absorption_split(t60, self.FREQS, self.DELAYS, self.FS)
+        assert np.all(air > 0.0)
+        assert np.all(boundary > 0.0)
 
-    def test_warns_when_target_exceeds_air_budget(self):
-        from src.fdn.planewave_dfdn import air_absorption_split
-
-        # A very long T60 at high frequency leaves no boundary share.
-        t60 = np.tile(np.full(8, 60.0), (4, 1))
-        with pytest.warns(RuntimeWarning, match="air absorption alone permits"):
-            air_absorption_split(t60, self.FREQS, self.DELAYS, self.FS)
-
-    def test_realised_t60_is_unaffected(self):
-        """Attribution must not change the filters, hence not the decay."""
+    def test_enabling_air_shortens_the_decay(self):
+        """The point of the change: the flag must now affect the sound."""
         from src.fdn.planewave_dfdn import PlaneWaveDFDN
 
-        t60 = np.array([1.8, 1.7, 1.6, 1.4, 1.2, 1.0, 0.7, 0.45]) * 1e3
-        rirs = []
+        rt = {}
         for air in (False, True):
             pw = PlaneWaveDFDN(self.FS, 8, sh_order=1, frame_size=64, seed=42)
             pw.setup(
                 delay_range_ms=(20.0, 60.0),
-                t60_per_direction_ms=t60,
+                t60_per_direction_ms=self.T60 * 1e3,
                 freqs=self.FREQS,
                 air_absorption=air,
             )
-            rirs.append(pw.render(0.0, 0.0, length_seconds=1.0))
-        np.testing.assert_allclose(rirs[0], rirs[1], atol=1e-12)
+            w = pw.render(0.0, 0.0, length_seconds=4.0,
+                          direct_gain=0.0, er_gain=0.0)[0]
+            import pyFDN
+
+            rt[air], fc = pyFDN.estimate_rt_bands(w, self.FS, n=8, start=-4)
+        top = int(np.argmin(np.abs(fc - 8000.0)))
+        assert rt[True][top] < rt[False][top]      # 8 kHz decays faster
+        low = int(np.argmin(np.abs(fc - 125.0)))
+        assert rt[True][low] == pytest.approx(rt[False][low], rel=0.05)
 
     def test_attributes_exposed_on_the_class(self):
         from src.fdn.planewave_dfdn import PlaneWaveDFDN
 
-        t60 = np.array([1.8, 1.7, 1.6, 1.4, 1.2, 1.0, 0.7, 0.45]) * 1e3
         pw = PlaneWaveDFDN(self.FS, 8, sh_order=1, frame_size=64, seed=42)
         pw.setup(
             delay_range_ms=(20.0, 60.0),
-            t60_per_direction_ms=t60,
+            t60_per_direction_ms=self.T60 * 1e3,
             freqs=self.FREQS,
             air_absorption=True,
         )
         assert pw.air_attenuation_db.shape == (pw.total_delay_lines, 8)
         assert pw.boundary_attenuation_db.shape == (pw.total_delay_lines, 8)
+        assert pw.realised_t60_s.shape == (pw.total_delay_lines, 8)
+        assert np.all(pw.realised_t60_s <= self.T60[None, :] + 1e-12)
 
 
 class TestAnalysisHelpers:

@@ -137,75 +137,131 @@ def air_absorption_db_per_meter(
     return alpha
 
 
-def air_absorption_split(
-    t60_s: NDArray,
+def air_absorption_t60(
     freqs: NDArray,
-    delays: NDArray,
-    fs: float,
     *,
     temperature_c: float = 20.0,
     humidity_percent: float = 50.0,
     pressure_kpa: float = 101.325,
-) -> tuple[NDArray, NDArray]:
-    """Attribute the required round-trip attenuation to medium and boundary.
+    speed_of_sound: float = _SPEED_OF_SOUND,
+) -> NDArray:
+    """Reverberation time the medium alone would impose, in seconds.
 
-    Air absorption is part of the T60 budget, not an extra loss on top of it:
-    the medium takes its share of the attenuation each round trip must lose,
-    and the boundary supplies the rest.  The realised T60 is therefore
-    unchanged by this function -- it only says how the loss divides.
-
-    A non-positive boundary share means air absorption alone already decays
-    faster than the target, i.e. no real room could sustain that T60 at these
-    atmospheric conditions; this raises a ``RuntimeWarning`` naming the worst
-    band.
+    Sound travelling ``c`` metres per second through air losing
+    ``alpha`` dB per metre falls 60 dB in ``60 / (alpha * c)`` seconds,
+    independently of any room.  This is the ceiling on T60 at each frequency:
+    no boundary treatment can make a room ring longer than its air allows.
 
     Parameters
     ----------
-    t60_s : NDArray, shape (N, n_bands)
-        Target T60 in seconds, one row per delay line.
-    freqs : NDArray, shape (n_bands,)
+    freqs : NDArray
         Frequencies in Hz.
-    delays : NDArray, shape (N,)
-        Delay-line lengths in samples.  The air share is computed over the
-        physical propagation path only.
-    fs : float
-        Sample rate in Hz.
     temperature_c, humidity_percent, pressure_kpa : float
         Atmospheric conditions, passed to :func:`air_absorption_db_per_meter`.
+    speed_of_sound : float
+        Propagation speed in m/s.
 
     Returns
     -------
-    air_db, boundary_db : NDArray, shape (N, n_bands)
-        Attenuation in dB per round trip attributed to each.
+    NDArray
+        T60 in seconds, one per frequency.  Falls steeply above a few kHz.
     """
-    import warnings
-
-    t60_s = np.atleast_2d(np.asarray(t60_s, dtype=float))
-    delays = np.asarray(delays, dtype=float).ravel()
     alpha_db_per_m = air_absorption_db_per_meter(
         np.asarray(freqs, dtype=float),
         temperature_c=temperature_c,
         humidity_percent=humidity_percent,
         pressure_kpa=pressure_kpa,
     )
+    return 60.0 / (alpha_db_per_m * speed_of_sound)
 
-    required_db = 60.0 * delays[:, np.newaxis] / (fs * np.maximum(t60_s, 1e-3))
-    path_m = delays[:, np.newaxis] / fs * _SPEED_OF_SOUND
-    air_db = alpha_db_per_m[np.newaxis, :] * path_m
-    boundary_db = required_db - air_db
 
-    worst = float(np.min(boundary_db))
-    if worst < 0.0:
-        band = float(np.asarray(freqs)[int(np.argmin(np.min(boundary_db, axis=0)))])
-        warnings.warn(
-            f"Target T60 exceeds what air absorption alone permits at "
-            f"{band:.0f} Hz (boundary share {worst:.3f} dB per round trip, "
-            f"i.e. negative). The requested T60 is still realised, but no real "
-            f"room could sustain it at these atmospheric conditions -- shorten "
-            f"the target T60 in that band, or lower the humidity/temperature.",
-            RuntimeWarning,
-            stacklevel=2,
-        )
+def air_limited_t60(
+    t60_boundary_s: NDArray, freqs: NDArray, **atmosphere: float
+) -> NDArray:
+    """Combine boundary and medium decay into a realisable T60 target.
+
+    Decay rates add, so
+
+    .. math::
+        \frac{1}{T_{60}} = \frac{1}{T_\text{boundary}} + \frac{1}{T_\text{air}}
+
+    which is algebraically the ``4mV`` air term of the standard Sabine and
+    Eyring formulae, ``T60 = 0.161 V / (S alpha + 4 m V)``, rewritten without
+    reference to a specific room.
+
+    This is where air absorption belongs in an FDN.  Every reference
+    implementation -- fdnToolbox's ``absorptionGEQ``, ``onePoleAbsorption`` and
+    ``firstOrderAbsorption``; the ``pyFDN`` translations of them; the DAFx24
+    tutorial's ``absorption_filter`` -- takes reverberation time and delay
+    lengths and nothing else.  None models a propagation medium, so the medium
+    has to reach the network through the target it is asked to realise.
+
+    Parameters
+    ----------
+    t60_boundary_s : NDArray
+        Target T60 in seconds from boundary absorption alone.  Shape
+        ``(n_bands,)`` or ``(N, n_bands)``.
+    freqs : NDArray, shape (n_bands,)
+        Frequencies in Hz at which the target is specified.
+    **atmosphere
+        Forwarded to :func:`air_absorption_t60`.
+
+    Returns
+    -------
+    NDArray
+        Realisable T60 in seconds, never longer than *t60_boundary_s* and
+        appreciably shorter above a few kHz.
+    """
+    t60_boundary_s = np.asarray(t60_boundary_s, dtype=float)
+    t_air = air_absorption_t60(freqs, **atmosphere)
+    return 1.0 / (1.0 / t60_boundary_s + 1.0 / t_air)
+
+
+def air_absorption_split(
+    t60_boundary_s: NDArray,
+    freqs: NDArray,
+    delays: NDArray,
+    fs: float,
+    **atmosphere: float,
+) -> tuple[NDArray, NDArray]:
+    """Split the round-trip attenuation into medium and boundary shares.
+
+    A diagnostic companion to :func:`air_limited_t60`, saying how much of each
+    delay line's per-round-trip loss the air supplies and how much the
+    boundary does.  Because decay rates add, so do the attenuations, and the
+    two shares sum exactly to the loss required by the combined target.
+
+    Both shares are positive by construction.  An earlier formulation
+    subtracted the air share from a fixed budget and could report a negative
+    boundary share, meaning the requested T60 was longer than air alone
+    permits; under the combined model that situation cannot arise, because the
+    air share shortens the target instead of competing with it.
+
+    Parameters
+    ----------
+    t60_boundary_s : NDArray, shape (N, n_bands) or (n_bands,)
+        Boundary-only target T60 in seconds.
+    freqs : NDArray, shape (n_bands,)
+        Frequencies in Hz.
+    delays : NDArray, shape (N,)
+        Delay-line lengths in samples.  The air share is computed over the
+        physical propagation path they represent.
+    fs : float
+        Sample rate in Hz.
+    **atmosphere
+        Forwarded to :func:`air_absorption_t60`.
+
+    Returns
+    -------
+    air_db, boundary_db : NDArray, shape (N, n_bands)
+        Attenuation in dB per round trip attributed to each.
+    """
+    t60_boundary_s = np.atleast_2d(np.asarray(t60_boundary_s, dtype=float))
+    delays = np.asarray(delays, dtype=float).ravel()[:, np.newaxis]
+    t_air = air_absorption_t60(freqs, **atmosphere)[np.newaxis, :]
+
+    air_db = 60.0 * delays / (fs * t_air)
+    boundary_db = 60.0 * delays / (fs * np.maximum(t60_boundary_s, 1e-6))
     return air_db, boundary_db
 
 
@@ -447,6 +503,16 @@ class PlaneWaveDFDN:
         Processing block size in samples.
     seed : int, optional
         Random seed for reproducibility.
+
+    Attributes
+    ----------
+    realised_t60_s : NDArray or None
+        The T60 actually designed for, shape ``(N*Q, n_bands)``.  Equals the
+        requested target unless ``air_absorption`` shortened it.
+    air_attenuation_db, boundary_attenuation_db : NDArray or None
+        Per-round-trip attenuation in dB attributed to the medium and to the
+        boundary, shape ``(N*Q, n_bands)``.  Set only when ``air_absorption``
+        is enabled; they sum to the loss the realised target requires.
     """
 
     def __init__(
@@ -482,6 +548,7 @@ class PlaneWaveDFDN:
         self.absorption_sos: NDArray | None = None
         self.air_attenuation_db: NDArray | None = None
         self.boundary_attenuation_db: NDArray | None = None
+        self.realised_t60_s: NDArray | None = None
         self._kronecker_matrix: NDArray | None = None
         self._base_feedback: FeedbackMatrix | None = None
         self._encoding_matrix: NDArray | None = None  # E (Eq. 13)
@@ -566,13 +633,16 @@ class PlaneWaveDFDN:
         feedback_type : FeedbackMatrixType
             Type of base N×N feedback matrix.
         air_absorption : bool, optional
-            Account for atmospheric absorption (ISO 9613-1) within the
-            target T60 budget rather than as an extra loss on top of it.
-            The realised T60 still equals *t60_per_direction_ms*; what
-            changes is that the required attenuation is split into a
-            medium share and a boundary share, and a warning is raised if
-            the requested T60 is longer than air absorption alone permits.
-            Requires *freqs*.  Default ``False``.
+            Treat *t60_per_direction_ms* as the **boundary-only** target and
+            add atmospheric absorption (ISO 9613-1) on top of it, so the
+            realised decay is ``1/T = 1/T_boundary + 1/T_air`` -- the ``4mV``
+            term of Sabine and Eyring.  The realised T60 is therefore shorter
+            than requested, appreciably so above a few kHz, and is recorded in
+            :attr:`realised_t60_s`.  The medium and boundary shares of each
+            round trip are exposed as :attr:`air_attenuation_db` and
+            :attr:`boundary_attenuation_db`.  Requires *freqs*; ignored with a
+            warning for a broadband T60, whose single value cannot carry a
+            frequency-dependent medium.  Default ``False``.
         lateral_mix : float, optional
             Inter-direction mixing strength in [0, 1].  ``0`` (default,
             faithful to ICASSP 2020) uses ``A ⊗ I_Q`` and preserves
@@ -646,6 +716,7 @@ class PlaneWaveDFDN:
         # path regardless.
         self.air_attenuation_db = None
         self.boundary_attenuation_db = None
+        self.realised_t60_s = None
         if t60_expanded.ndim == 1:
             # Broadband: one scalar gain per channel, round trip = m exactly.
             t60_s = np.maximum(t60_expanded, 1.0) * 1e-3
@@ -665,14 +736,22 @@ class PlaneWaveDFDN:
                 )
         else:
             t60_2d = t60_expanded * 1e-3
+            if air_absorption:
+                # The medium enters through the target, which is the only place
+                # an FDN has for it: every reference implementation designs
+                # absorption from reverberation time and delay lengths alone.
+                # Summing decay rates is the 4mV term of Sabine and Eyring.
+                self.air_attenuation_db, self.boundary_attenuation_db = (
+                    air_absorption_split(t60_2d, freqs, all_lengths, self.sample_rate)
+                )
+                t60_2d = air_limited_t60(t60_2d, freqs)
+            self.realised_t60_s = np.broadcast_to(
+                t60_2d, (N * Q, np.size(freqs))
+            ).copy()
             self.absorption_sos = design_absorption_sos(
                 t60_2d, freqs, all_lengths, self.sample_rate
             )
             self.absorption = SOSFilterBank(self.absorption_sos, N * Q)
-            if air_absorption:
-                self.air_attenuation_db, self.boundary_attenuation_db = (
-                    air_absorption_split(t60_2d, freqs, all_lengths, self.sample_rate)
-                )
 
         # 5. Output encoding matrix E (Eq. 13) — default: Ambisonics
         self._init_ambisonics_encoding()

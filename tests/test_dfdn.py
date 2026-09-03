@@ -631,18 +631,43 @@ class TestAirAbsorptionAccounting:
         )
         return pw
 
-    def test_air_absorption_preserves_realised_t60(self):
-        """Toggling air absorption must not shift the realised T60.
+    def test_air_absorption_shortens_realised_t60(self):
+        """Toggling air absorption must shorten the decay, most at HF.
 
         Compared against air=False rather than the target so that the
         (separate) filter-fitting error cancels out.
         """
         off = self._realised_t60_ms(self._make(False), self.freqs)
         on = self._realised_t60_ms(self._make(True), self.freqs)
-        np.testing.assert_allclose(on, off, rtol=0.01)
+        assert np.all(on <= off * (1.0 + 1e-9))
+        # 125 Hz is barely touched; 8 kHz clearly is.
+        assert on[0] == pytest.approx(off[0], rel=0.01)
+        assert on[-1] < off[-1] * 0.85
 
-    def test_infeasible_target_warns(self):
-        """A T60 longer than air absorption alone permits must warn."""
+    def test_shares_account_for_the_realised_decay(self):
+        """air_db + boundary_db must equal the loss the realised T60 needs."""
+        pw = self._make(True)
+        required = (
+            60.0
+            * np.asarray(pw.delay_length_samps, dtype=float)[:, None]
+            / (pw.sample_rate * pw.realised_t60_s)
+        )
+        np.testing.assert_allclose(
+            pw.air_attenuation_db + pw.boundary_attenuation_db, required, rtol=1e-10
+        )
+
+    def test_target_beyond_the_air_budget_is_clamped_toward_it(self):
+        """Air is a ceiling: a 5 s target at 8 kHz cannot survive it.
+
+        This replaces an earlier warning-based check.  Under the combined
+        model an unreachable target is not an error to report, it is simply
+        pulled down toward what the medium allows.
+        """
+        from src.fdn.planewave_dfdn import air_absorption_t60
+
         t60 = np.array([1000.0, 1100.0, 1000.0, 5000.0])
-        with pytest.warns(RuntimeWarning, match="air absorption"):
-            self._make(True, t60_ms=t60)
+        pw = self._make(True, t60_ms=t60)
+        ceiling = air_absorption_t60(self.freqs)[-1]
+        realised_top = pw.realised_t60_s[:, -1].mean()
+        assert realised_top < 5.0 * 0.5
+        assert realised_top < ceiling
