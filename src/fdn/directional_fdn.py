@@ -1,6 +1,7 @@
 """Directional Feedback Delay Network (DFDN).
 
-Implementation of Benoit et al. (2019) *"Directional Feedback Delay Network"*.
+Implementation of Alary, B., Politis, A., Schlecht, S. J., and Valimaki, V.,
+*"Directional Feedback Delay Network"*, J. Audio Eng. Soc., 67(10), 752-762, 2019.
 
 Architecture
 ------------
@@ -14,12 +15,11 @@ Architecture
 
 Usage
 -----
->>> from directional_fdn.fdn.directional_fdn import DirectionalFDN
+>>> from src.fdn.directional_fdn import DirectionalFDN
 >>> dfdn = DirectionalFDN(
 ...     sample_rate=48000,
 ...     num_delay_line_groups=4,
 ...     ambisonics_order=1,
-...     frame_size=64,
 ... )
 >>> dfdn.setup(delay_range_ms=(10, 30), des_t60_ms=800)
 >>> rir = dfdn.render(source_azimuth=0.0, source_elevation=0.0,
@@ -29,21 +29,24 @@ Usage
 from __future__ import annotations
 
 import numpy as np
+import pyFDN
 from numpy.typing import NDArray
 from scipy.linalg import block_diag
 
 from . import spatial
-from .delay_line import generate_delay_lengths
-from .fdn import FDN
-from .feedback_matrix import FeedbackMatrix, FeedbackMatrixType
-from .render import render_fdn
+from .fdn_components import (
+    FeedbackMatrix,
+    FeedbackMatrixType,
+    design_absorption_sos,
+    generate_delay_lengths,
+)
 from .transform import DirectionalWeighting
 
 
-class DirectionalFDN(FDN):
-    """Directional Feedback Delay Network (Benoit et al. 2019).
+class DirectionalFDN:
+    """Directional Feedback Delay Network (Alary et al. 2019).
 
-    Extends :class:`FDN` with:
+    A :class:`pyFDN.FDNBuild` with:
 
     * delay lines organised into **groups** (N groups × Q channels),
     * Kronecker-product feedback ``A ⊗ I_Q``,
@@ -58,16 +61,6 @@ class DirectionalFDN(FDN):
         *N* — number of delay-line groups.
     ambisonics_order : int
         Ambisonics order (1 → 4 ch, 2 → 9 ch, 3 → 16 ch).
-    frame_size : int
-        Processing block size in samples.
-    scattering_amount : float
-        Controls inter-channel energy scattering in the feedback path.
-        ``0.0`` (default) preserves the paper-faithful ``A ⊗ I_Q`` design
-        where SH channels remain independent.  Values ``> 0`` blend toward
-        random orthogonal per-group matrices that couple SH channels,
-        modelling acoustic scattering that diffuses a directional input
-        toward omnidirectional over time.  Not described in the papers;
-        only needed when ``use_directional_input=True``.
     seed : int, optional
         Random seed for reproducibility.
     """
@@ -77,33 +70,22 @@ class DirectionalFDN(FDN):
         sample_rate: float = 48000,
         num_delay_line_groups: int = 4,
         ambisonics_order: int = 1,
-        frame_size: int = 64,
-        scattering_amount: float = 0.0,
         seed: int | None = None,
     ) -> None:
-        Q = spatial.num_channels(ambisonics_order)
-        total = num_delay_line_groups * Q
-        num_outputs = Q  # one output per Ambisonics channel
-
-        super().__init__(
-            sample_rate=sample_rate,
-            num_inputs=1,           # mono point-source input
-            num_outputs=num_outputs,
-            num_delay_lines=total,
-            frame_size=frame_size,
-            seed=seed,
-        )
-
+        self.sample_rate = sample_rate
         self.ambisonics_order = ambisonics_order
         self.num_delay_line_groups = num_delay_line_groups  # N
-        self.Q = Q                                          # channels per group
-        self.scattering_amount = float(np.clip(scattering_amount, 0.0, 1.0))
+        self.Q = (ambisonics_order + 1) ** 2               # channels per group
+        self.num_delay_lines = num_delay_line_groups * self.Q
+        self.num_outputs = self.Q  # one output per Ambisonics channel
+        self.seed = seed
 
-        # Optional modules
+        self.delay_length_samps: NDArray | None = None
+        self.absorption_gains: NDArray | None = None  # broadband, per line
+        self.absorption_sos: NDArray | None = None    # (sections, 6, N*Q)
         self.transform: DirectionalWeighting | None = None
         self._kronecker_matrix: NDArray | None = None
         self._base_feedback_matrix: NDArray | None = None
-        self._scattering_matrices: list[NDArray] | None = None
 
     # ==================================================================
     # High-level convenience
@@ -115,9 +97,6 @@ class DirectionalFDN(FDN):
         des_t60_ms: float | NDArray = 800.0,
         *,
         feedback_type: FeedbackMatrixType = FeedbackMatrixType.RANDOM,
-        freqs: NDArray | None = None,
-        filter_order: int | None = None,
-        warp_factor: float | None = None,
         rng: np.random.Generator | None = None,
     ) -> None:
         """One-call initialisation of all FDN components.
@@ -127,19 +106,11 @@ class DirectionalFDN(FDN):
         delay_range_ms : (float, float)
             Range for coprime delay-line lengths.
         des_t60_ms : float or NDArray
-            Desired T60 (ms).  Scalar → homogeneous; array → frequency-dependent.
+            Desired T60 (ms).  Scalar → homogeneous; a ``(10,)`` array →
+            frequency-dependent, on the graphic EQ's own grid (see
+            :func:`~src.fdn.fdn_components.geq_band_frequencies`).
         feedback_type : FeedbackMatrixType
             Type of base N×N feedback matrix.
-        freqs
-            Frequencies (Hz) for frequency-dependent absorption.
-        filter_order : int, optional
-            Ignored. Retained for API compatibility; absorption is now
-            designed as a graphic EQ (see :mod:`src.fdn.absorption_design`),
-            which takes no filter order or warping coefficient.
-        warp_factor : float, optional
-            Ignored. Retained for API compatibility; absorption is now
-            designed as a graphic EQ (see :mod:`src.fdn.absorption_design`),
-            which takes no filter order or warping coefficient.
         rng : np.random.Generator, optional
             Random generator for delay-length selection.
         """
@@ -152,28 +123,37 @@ class DirectionalFDN(FDN):
             delay_range_ms, N, self.sample_rate, rng=rng
         )
         # Replicate for all Q channels per group
-        all_lengths = np.repeat(group_lengths, Q)
-        self.init_delay_line_lengths(all_lengths)
+        self.delay_length_samps = np.repeat(group_lengths, Q).astype(np.int64)
 
         # 2. Feedback matrix  A ⊗ I_Q
         self._init_kronecker_feedback(feedback_type)
 
         # 3. Absorption
-        self.init_absorption(
-            des_t60_ms,
-            freqs=freqs,
-            filter_order=filter_order,
-            warp_factor=warp_factor,
-        )
+        self.init_absorption(des_t60_ms)
 
-        # 4. Delay lines
-        self.init_delay_lines()
+    def init_absorption(self, des_t60_ms: float | NDArray) -> None:
+        """Set the absorption from a T60 target.
 
-        # 5. I/O gains (paper defaults)
-        self._init_paper_io_gains()
-
-        # 6. Per-group scattering matrices (Q×Q, identity when amount=0)
-        self._init_scattering_matrices(self.scattering_amount)
+        Parameters
+        ----------
+        des_t60_ms : float or NDArray
+            Broadband (scalar) **or** frequency-dependent T60 in ms.  An array
+            is specified on the graphic EQ's own ten-point grid; see
+            :func:`~src.fdn.fdn_components.geq_band_frequencies`.
+        """
+        if self.delay_length_samps is None:
+            raise RuntimeError("Call setup() before init_absorption().")
+        t60_s = np.asarray(des_t60_ms, dtype=float) * 1e-3
+        if t60_s.ndim == 0:
+            self.absorption_gains = pyFDN.db_to_lin(
+                pyFDN.rt_to_slope(t60_s, self.sample_rate) * self.delay_length_samps
+            )
+            self.absorption_sos = None
+        else:
+            self.absorption_sos = design_absorption_sos(
+                t60_s, self.delay_length_samps, self.sample_rate
+            )
+            self.absorption_gains = None
 
     def set_directional_decay(
         self,
@@ -221,10 +201,12 @@ class DirectionalFDN(FDN):
         source_azimuth: float = 0.0,
         source_elevation: float = 0.0,
         length_seconds: float = 1.0,
-        *,
-        use_directional_input: bool = False,
     ) -> NDArray:
         """Generate an Ambisonics RIR for a point source.
+
+        Input is omnidirectional per Eq. 17, so the late reverb starts diffuse
+        and the DWM shapes anisotropy over time.  Sec. 2.1 puts the direct
+        sound and the early reflections in a separate parallel path.
 
         Parameters
         ----------
@@ -234,15 +216,6 @@ class DirectionalFDN(FDN):
             Source elevation in radians.
         length_seconds : float
             Duration of the impulse response in seconds.
-        use_directional_input : bool
-            If *False* (default), use omnidirectional input per Eq. 17.
-            This is the paper-correct mode: late reverb starts diffuse
-            and the DWM shapes anisotropy over time.  Early reflections
-            should be handled in a separate parallel path.
-            If *True*, encode the source direction into all SH channels.
-            Requires ``scattering_amount > 0`` to produce a plausible
-            diffuse tail; otherwise energy stays locked in the source
-            direction (by design of ``A ⊗ I_Q``).
 
         Returns
         -------
@@ -256,10 +229,7 @@ class DirectionalFDN(FDN):
         impulse[0, 0] = 1.0
 
         return self.process_from_direction(
-            impulse,
-            source_azimuth,
-            source_elevation,
-            use_directional_input=use_directional_input,
+            impulse, source_azimuth, source_elevation
         )
 
     # ==================================================================
@@ -271,14 +241,12 @@ class DirectionalFDN(FDN):
         input_data: NDArray,
         source_azimuth: float,
         source_elevation: float,
-        *,
-        use_directional_input: bool = False,
     ) -> NDArray:
         """Process audio through the directional FDN.
 
-        Implements the full signal flow of Benoit et al. 2019:
+        Implements the full signal flow of Alary et al. 2019:
 
-        1. Encode input (Eq. 17: omnidirectional, or directional variant).
+        1. Encode input omnidirectionally (Eq. 17).
         2. Feedback recursion with Kronecker product (Eq. 20).
         3. Optional Transform T_i for anisotropic decay (Section 3).
         4. Output extraction (Eq. 22).
@@ -289,8 +257,6 @@ class DirectionalFDN(FDN):
             Mono input signal (typically an impulse).
         source_azimuth, source_elevation : float
             Source direction in radians.
-        use_directional_input : bool
-            Use directional (non-paper) input encoding.
 
         Returns
         -------
@@ -301,84 +267,67 @@ class DirectionalFDN(FDN):
         if input_data.shape[0] != 1:
             raise ValueError("Input must be mono (1 channel).")
 
-        src_enc = spatial.encode_direction(
-            source_azimuth, source_elevation, self.ambisonics_order
-        )
-        b = self._build_input_gains(src_enc, directional=use_directional_input)
-        c = self._build_output_gains()
-
-        # Direct-path gain, Eq. 11: d = y(phi_0, theta_0), the plain SH
-        # encoding of the source direction.  No 1/N -- the paper sets d from
-        # the incident direction alone, and dividing by the group count would
-        # drop the direct sound 6 dB every time N doubled.
-        direct_gain = src_enc.reshape(self.num_outputs, 1)
-
-        return render_fdn(
-            input_data,
-            self.delay_length_samps,
-            self._effective_feedback_matrix(),
-            b,
-            c,
-            direct_gain,
-            absorption=self._absorption_hook(),
-        )
+        build = self._fdn_build(source_azimuth, source_elevation)
+        x = np.asarray(input_data, dtype=float)
+        return pyFDN.build_to_td(build).process_signal(x.T).T
 
     # ==================================================================
     # Internal helpers
     # ==================================================================
 
-    def _effective_feedback_matrix(self) -> NDArray:
-        """Return the full N*Q x N*Q feedback matrix with T_i and S_i folded in.
+    def _fdn_build(
+        self, source_azimuth: float, source_elevation: float
+    ) -> pyFDN.FDNBuild:
+        """The network for one source direction, as a pyFDN build."""
+        A = self._effective_feedback_matrix()
+        C = self._build_output_gains()
+        if self.absorption_gains is not None:
+            # Broadband loss is diag(g) between the delays and both A and C.
+            A = A * self.absorption_gains
+            C = C * self.absorption_gains
 
-        The recirculation path applies, per group, the scattering matrix S_i
-        then the Directional Weighting Matrix T_i, then the Kronecker feedback
-        A kron I_Q.  All three are static, so the composition is a single
-        matrix and the recursion needs no per-block hooks:
+        # Direct-path gain, Eq. 11: d = y(phi_0, theta_0), the plain SH
+        # encoding of the source direction.  No 1/N -- the paper sets d from
+        # the incident direction alone, and dividing by the group count would
+        # drop the direct sound 6 dB every time N doubled.
+        D = spatial.encode_directions(
+            source_azimuth, source_elevation, self.ambisonics_order
+        ).reshape(self.num_outputs, 1)
 
-            A' = (A kron I_Q) @ blockdiag(T_0 S_0, ..., T_{N-1} S_{N-1})
-        """
-        N = self.num_delay_line_groups
-        blocks = []
-        for g in range(N):
-            block = (
-                self._scattering_matrices[g]
-                if self._scattering_matrices is not None
-                else np.eye(self.Q)
-            )
-            if self.transform is not None:
-                block = self.transform.transform_matrices[g] @ block
-            blocks.append(block)
-        return self._kronecker_matrix @ block_diag(*blocks)
-
-    def _init_scattering_matrices(self, amount: float = 0.0) -> None:
-        """Generate per-group Q×Q scattering matrices.
-
-        When *amount* is 0 (default), each matrix is the identity —
-        preserving the paper-faithful ``A ⊗ I_Q`` where SH channels
-        stay independent.  When *amount* > 0, a convex blend toward a
-        random orthogonal matrix is used and then re-orthogonalised
-        via QR to keep the feedback lossless.  This models acoustic
-        scattering that gradually diffuses directional energy across
-        SH channels (not described in the papers; useful when
-        ``use_directional_input=True``).
-        """
-        Q = self.Q
-        self._scattering_matrices = []
-
-        if amount <= 0.0:
-            for _ in range(self.num_delay_line_groups):
-                self._scattering_matrices.append(np.eye(Q))
-            return
-
-        rng = np.random.default_rng(
-            self.seed + 9999 if self.seed is not None else None
+        return pyFDN.FDNBuild(
+            A=A,
+            B=self._build_input_gains(),
+            C=C,
+            D=D,
+            delays=self.delay_length_samps,
+            fs=float(self.sample_rate),
+            post_delay=self.absorption_sos,
         )
-        for _ in range(self.num_delay_line_groups):
-            H = rng.standard_normal((Q, Q))
-            R, _ = np.linalg.qr(H)
-            blended = (1.0 - amount) * np.eye(Q) + amount * R
-            S, _ = np.linalg.qr(blended)
-            self._scattering_matrices.append(S)
+
+    def _effective_feedback_matrix(self) -> NDArray:
+        """Return the full N*Q x N*Q feedback matrix with T_i folded in.
+
+        The recirculation path applies, per group, the Directional Weighting
+        Matrix T_i, then the Kronecker feedback A kron I_Q.  Both are static,
+        so the composition is a single matrix and the recursion needs no
+        per-block hooks:
+
+            A' = (A kron I_Q) @ blockdiag(T_0, ..., T_{N-1})
+
+        Eq. 23 writes the recursion as ``sum_j A_ij g_j T_j s_j``, absorption
+        between the transform and the feedback, where pyFDN applies
+        absorption to the delay-line output and so evaluates ``A' g``.  The
+        two agree here because every channel of a group shares that group's
+        delay length (Sec. 2.2), so its absorption is one filter times I_Q and
+        commutes with T_j -- verified identical to 0.0 across a group's
+        channels.  It would *not* commute in a formulation with per-channel
+        delays, which is why the plane-wave class has no transform to fold.
+        """
+        if self.transform is None:
+            return self._kronecker_matrix
+        return self._kronecker_matrix @ block_diag(
+            *self.transform.transform_matrices
+        )
 
     def _init_kronecker_feedback(
         self, matrix_type: FeedbackMatrixType
@@ -387,7 +336,6 @@ class DirectionalFDN(FDN):
         base = FeedbackMatrix(
             self.num_delay_line_groups,
             matrix_type,
-            self.frame_size,
             seed=self.seed,
         )
         self._base_feedback_matrix = base.matrix
@@ -405,44 +353,18 @@ class DirectionalFDN(FDN):
                 f"Kronecker feedback matrix unitarity error: {err:.2e}"
             )
 
-        # Also store as the base FDN feedback for compatibility
-        self.feedback = base
+    def _build_input_gains(self) -> NDArray:
+        """Construct the input gain matrix b, per Eq. 17.
 
-    def _init_paper_io_gains(self) -> None:
-        """Set I/O gains per paper Eqs. 17 and 22.
-
-        The stored direct-path gain is zero here because ``render()``
-        and ``process_from_direction()`` compute ``d`` per-call from
-        the actual source direction (Eq. 11).
-        """
-        dummy_enc = np.zeros(self.Q)
-        b = self._build_input_gains(dummy_enc, directional=False)
-        c = self._build_output_gains()
-        self.init_io_gains(b, c)
-        self.init_direct_gain(np.zeros((self.num_outputs, 1)))
-
-    def _build_input_gains(
-        self, source_encoding: NDArray, *, directional: bool
-    ) -> NDArray:
-        """Construct the input gain matrix b for a given direction.
-
-        Parameters
-        ----------
-        source_encoding : NDArray, shape (Q,)
-        directional : bool
-            If *True*, each group receives the full Ambisonics encoding
-            (better auralization but departs from Eq. 17).
+        Omnidirectional: each group is driven through its W channel alone, so
+        the late reverb starts diffuse and the DWM shapes anisotropy over the
+        decay.  The source direction does not enter here -- it reaches the
+        output through the direct-path gain d of Eq. 11.
         """
         N, Q = self.num_delay_line_groups, self.Q
         b = np.zeros((self.num_delay_lines, 1))
-        if directional:
-            for g in range(N):
-                s = g * Q
-                b[s : s + Q, 0] = source_encoding / np.sqrt(N)
-        else:
-            # Paper Eq. 17: omnidirectional (W only)
-            for g in range(N):
-                b[g * Q, 0] = 1.0 / np.sqrt(N)
+        for g in range(N):
+            b[g * Q, 0] = 1.0 / np.sqrt(N)
         return b
 
     def _build_output_gains(self) -> NDArray:
@@ -456,9 +378,9 @@ class DirectionalFDN(FDN):
 
     def _check_ready(self) -> None:
         """Check that the DFDN is fully initialised."""
-        if self.delay_lines is None:
+        if self.delay_length_samps is None:
             raise RuntimeError("Call setup() before processing.")
         if self._kronecker_matrix is None:
             raise RuntimeError("Kronecker feedback matrix not initialised.")
-        if self.absorption is None:
+        if self.absorption_gains is None and self.absorption_sos is None:
             raise RuntimeError("Absorption not initialised.")

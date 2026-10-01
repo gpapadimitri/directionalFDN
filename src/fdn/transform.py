@@ -128,7 +128,7 @@ class DirectionalWeighting:
     ) -> None:
         self.N = num_groups
         self.L = ambisonics_order
-        self.Q = spatial.num_channels(ambisonics_order)
+        self.Q = (ambisonics_order + 1) ** 2
         self.group_delay_lengths = np.asarray(group_delay_lengths, dtype=np.int64)
         self.sample_rate = sample_rate
 

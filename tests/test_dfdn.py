@@ -3,18 +3,20 @@
 from __future__ import annotations
 
 import numpy as np
+import pyFDN
 import pytest
 
-from src.fdn.absorption import AbsorptionGains, create_absorption
-from src.fdn.delay_line import DelayLine, generate_distinct_delay_lengths
 from src.fdn.directional_fdn import DirectionalFDN
-from src.fdn.fdn import FDN
-from src.fdn.feedback_matrix import FeedbackMatrix, FeedbackMatrixType
+from src.fdn.fdn_components import (
+    FeedbackMatrix,
+    FeedbackMatrixType,
+    generate_distinct_delay_lengths,
+    geq_band_frequencies,
+)
+from src.fdn.planewave_dfdn import PlaneWaveDFDN
+from src.fdn.room import Reflection
 from src.fdn.spatial import (
-    acn_to_lm,
-    encode_direction,
     encode_directions,
-    num_channels,
     uniform_directions,
 )
 from src.fdn.transform import DirectionalWeighting
@@ -39,55 +41,41 @@ class TestUtils:
 # ======================================================================
 
 class TestSpatial:
-    # SN3D normalisation constant: Y_0^0 = 1/sqrt(4π)
-    _W = 1.0 / np.sqrt(4.0 * np.pi)
-
-    def test_acn_to_lm(self):
-        assert acn_to_lm(0) == (0, 0)
-        assert acn_to_lm(1) == (1, -1)
-        assert acn_to_lm(2) == (1, 0)
-        assert acn_to_lm(3) == (1, 1)
-        assert acn_to_lm(4) == (2, -2)
-
-    def test_num_channels(self):
-        assert num_channels(0) == 1
-        assert num_channels(1) == 4
-        assert num_channels(2) == 9
-        assert num_channels(3) == 16
+    # AmbiX SN3D: Y_0^0 = 1 in every direction.
+    _W = 1.0
 
     def test_encode_front(self):
         """Front direction (0, 0) → W active, X active (ACN 3)."""
-        c = encode_direction(0.0, 0.0, order=1)
+        c = encode_directions(0.0, 0.0, order=1)
         np.testing.assert_allclose(
             c, [self._W, 0.0, 0.0, self._W], atol=1e-12,
         )
 
     def test_encode_left(self):
         """Left direction (π/2, 0) → W active, Y active (ACN 1)."""
-        c = encode_direction(np.pi / 2, 0.0, order=1)
+        c = encode_directions(np.pi / 2, 0.0, order=1)
         np.testing.assert_allclose(
             c, [self._W, self._W, 0.0, 0.0], atol=1e-12,
         )
 
     def test_encode_up(self):
         """Up direction (0, π/2) → W active, Z active (ACN 2)."""
-        c = encode_direction(0.0, np.pi / 2, order=1)
+        c = encode_directions(0.0, np.pi / 2, order=1)
         np.testing.assert_allclose(
             c, [self._W, 0.0, self._W, 0.0], atol=1e-12,
         )
 
     def test_encode_normalisation(self):
-        """First-order SN3D: ||[Y,Z,X]|| = 1/√(4π) for any direction."""
+        """First-order SN3D: ||[Y,Z,X]|| = 1 for any direction."""
         for az in np.linspace(0, 2 * np.pi, 13):
             for el in np.linspace(-np.pi / 2, np.pi / 2, 7):
-                c = encode_direction(az, el, order=1)
+                c = encode_directions(az, el, order=1)
                 assert abs(np.linalg.norm(c[1:]) - self._W) < 1e-12
 
-    def test_encode_directions_shape(self):
+    def test_encode_shape(self):
+        assert encode_directions(0.3, 0.1, order=2).shape == (9,)
         az = np.linspace(0, np.pi, 5)
-        el = np.zeros(5)
-        out = encode_directions(az, el, order=2)
-        assert out.shape == (5, 9)
+        assert encode_directions(az, 0.0, order=2).shape == (5, 9)
 
     def test_uniform_directions(self):
         az, el = uniform_directions(50)
@@ -96,38 +84,10 @@ class TestSpatial:
 
 
 # ======================================================================
-# Delay line
+# Delay lengths
 # ======================================================================
 
-class TestDelayLine:
-    def test_basic_delay(self):
-        dl = DelayLine(100, 10)
-        # Write an impulse
-        buf = np.zeros(10)
-        buf[0] = 1.0
-        dl.write(buf)
-        # Should not appear yet (delay = 100)
-        out = dl.read()
-        assert np.allclose(out, 0.0)
-
-    def test_fifo_order(self):
-        dl = DelayLine(20, 10)
-        buf1 = np.arange(10, dtype=float)
-        dl.write(buf1)
-        dl.write(np.zeros(10))
-        out = dl.read()
-        np.testing.assert_allclose(out, buf1)
-
-    def test_too_short_raises(self):
-        with pytest.raises(ValueError):
-            DelayLine(5, 10)
-
-    def test_reset(self):
-        dl = DelayLine(100, 10)
-        dl.write(np.ones(10))
-        dl.reset()
-        assert np.allclose(dl.data, 0.0)
-
+class TestDelayLengths:
     def test_coprime_lengths(self):
         lengths = generate_distinct_delay_lengths(
             (10, 30), 4, 48000, rng=np.random.default_rng(42)
@@ -141,96 +101,25 @@ class TestDelayLine:
 # ======================================================================
 
 class TestFeedbackMatrix:
-    def test_random_is_unitary(self):
-        fb = FeedbackMatrix(8, FeedbackMatrixType.RANDOM, 64, seed=0)
-        assert FeedbackMatrix.is_unitary(fb.matrix)
+    def test_random_is_lossless(self):
+        fb = FeedbackMatrix(8, FeedbackMatrixType.RANDOM, seed=0)
+        assert pyFDN.is_unilossless(fb.matrix)
 
-    def test_hadamard_is_unitary(self):
-        fb = FeedbackMatrix(8, FeedbackMatrixType.HADAMARD, 64)
-        assert FeedbackMatrix.is_unitary(fb.matrix)
+    def test_hadamard_is_lossless(self):
+        fb = FeedbackMatrix(8, FeedbackMatrixType.HADAMARD)
+        assert pyFDN.is_unilossless(fb.matrix)
 
     def test_hadamard_non_power_of_two_raises(self):
         with pytest.raises(ValueError):
-            FeedbackMatrix(6, FeedbackMatrixType.HADAMARD, 64)
+            FeedbackMatrix(6, FeedbackMatrixType.HADAMARD)
 
     def test_process_preserves_energy(self):
-        fb = FeedbackMatrix(4, FeedbackMatrixType.RANDOM, 32, seed=1)
+        fb = FeedbackMatrix(4, FeedbackMatrixType.RANDOM, seed=1)
         x = np.random.default_rng(2).standard_normal((4, 32))
         y = fb.matrix @ x
         np.testing.assert_allclose(
             np.sum(x**2), np.sum(y**2), rtol=1e-10
         )
-
-
-# ======================================================================
-# Absorption
-# ======================================================================
-
-class TestAbsorption:
-    def test_gains_attenuate(self):
-        lengths = np.array([500, 600, 700, 800])
-        abs_g = AbsorptionGains(4, lengths, 48000, 32, 500.0)
-        x = np.ones((4, 32))
-        y = abs_g.process(x)
-        # Output should be attenuated
-        assert np.all(y < x)
-        assert np.all(y > 0)
-
-    def test_factory_scalar(self):
-        abs_obj = create_absorption(4, np.array([500, 600, 700, 800]), 48000, 32, 500.0)
-        assert isinstance(abs_obj, AbsorptionGains)
-
-
-# ======================================================================
-# Base FDN
-# ======================================================================
-
-class TestFDN:
-    def _make_fdn(self, seed=42):
-        fdn = FDN(48000, 1, 1, 4, 64, seed=seed)
-        fdn.init_delay_line_lengths(np.array([521, 601, 701, 809]))
-        fdn.init_feedback_matrix(FeedbackMatrixType.RANDOM)
-        fdn.init_absorption(500.0)
-        fdn.init_delay_lines()
-        b = np.ones((4, 1)) / 2.0
-        c = np.ones((1, 4)) / 2.0
-        fdn.init_io_gains(b, c)
-        fdn.init_direct_gain(np.zeros((1, 1)))
-        return fdn
-
-    def test_process_shape(self):
-        fdn = self._make_fdn()
-        imp = np.zeros((1, 48000))
-        imp[0, 0] = 1.0
-        out = fdn.process(imp)
-        assert out.shape == (1, 48000)
-
-    def test_output_not_silent(self):
-        fdn = self._make_fdn()
-        imp = np.zeros((1, 48000))
-        imp[0, 0] = 1.0
-        out = fdn.process(imp)
-        assert np.max(np.abs(out)) > 1e-6
-
-    def test_output_decays(self):
-        fdn = self._make_fdn()
-        imp = np.zeros((1, 48000))
-        imp[0, 0] = 1.0
-        out = fdn.process(imp)
-        # Energy in first quarter should exceed last quarter
-        e1 = np.sum(out[0, :12000] ** 2)
-        e4 = np.sum(out[0, 36000:] ** 2)
-        assert e1 > e4
-
-    def test_reset_clears_state(self):
-        fdn = self._make_fdn()
-        imp = np.zeros((1, 4800))
-        imp[0, 0] = 1.0
-        fdn.process(imp)
-        fdn.reset()
-        # After reset, processing silence should be silent
-        out = fdn.process(np.zeros((1, 4800)))
-        assert np.max(np.abs(out)) < 1e-12
 
 
 # ======================================================================
@@ -243,7 +132,6 @@ class TestDirectionalFDN:
             sample_rate=48000,
             num_delay_line_groups=4,
             ambisonics_order=1,
-            frame_size=64,
             seed=seed,
         )
         dfdn.setup(delay_range_ms=(10, 30), des_t60_ms=800)
@@ -256,23 +144,11 @@ class TestDirectionalFDN:
         assert rir.shape == (4, expected_len)
 
     def test_w_channel_active_with_omni_input(self):
-        """With omnidirectional input (paper mode), W channel should be active."""
+        """Eq. 17 drives W, so the W channel carries the late field."""
         dfdn = self._make_dfdn()
-        rir = dfdn.render(0.0, 0.0, length_seconds=0.5, use_directional_input=False)
+        rir = dfdn.render(0.0, 0.0, length_seconds=0.5)
         w_energy = np.sum(rir[0] ** 2)
         assert w_energy > 1e-6
-
-    def test_directional_input_activates_xyz(self):
-        """Directional input (extension) should create energy in X/Y/Z channels."""
-        dfdn = self._make_dfdn()
-        rir = dfdn.render(
-            np.pi / 4, 0.0, length_seconds=0.5, use_directional_input=True
-        )
-        # X and Y should have energy for az=π/4
-        x_energy = np.sum(rir[3] ** 2)
-        y_energy = np.sum(rir[1] ** 2)
-        assert x_energy > 1e-8
-        assert y_energy > 1e-8
 
     def test_direct_path_encodes_direction(self):
         """Direct path d should encode source direction (Eq. 11)."""
@@ -281,10 +157,9 @@ class TestDirectionalFDN:
         # Front source: first sample should have X > 0 (ACN 3)
         assert rir[3, 0] > 0
 
-    def test_reset_between_renders(self):
+    def test_repeat_render_is_deterministic(self):
         dfdn = self._make_dfdn()
         rir1 = dfdn.render(0.0, 0.0, length_seconds=0.2)
-        dfdn.reset()
         rir2 = dfdn.render(0.0, 0.0, length_seconds=0.2)
         np.testing.assert_allclose(rir1, rir2, atol=1e-12)
 
@@ -292,13 +167,11 @@ class TestDirectionalFDN:
         """Directional decay + DWM: different source directions should differ."""
         dfdn = self._make_dfdn()
         K = 60
-        az_map = np.linspace(0, 2 * np.pi, K, endpoint=False)
-        el_map = np.zeros(K)
+        az_map, el_map = uniform_directions(K)
         t60_map = 400.0 + 400.0 * np.abs(np.cos(az_map))
         dfdn.set_directional_decay(t60_map, az_map, el_map)
 
         rir_front = dfdn.render(0.0, 0.0, length_seconds=0.3)
-        dfdn.reset()
         rir_left = dfdn.render(np.pi / 2, 0.0, length_seconds=0.3)
         assert not np.allclose(rir_front, rir_left, atol=1e-10)
 
@@ -324,8 +197,7 @@ class TestDirectionalFDN:
 class TestDirectionalWeighting:
     def test_matrices_correct_shape(self):
         K = 60
-        azimuths = np.linspace(0, 2 * np.pi, K, endpoint=False)
-        elevations = np.zeros(K)
+        azimuths, elevations = uniform_directions(K)
         t60_ms = 600.0 + 200.0 * np.abs(np.cos(azimuths))
         group_lengths = np.array([521, 601, 701, 809])
 
@@ -364,9 +236,10 @@ class TestDirectionalWeighting:
     def test_anisotropic_off_diagonal(self):
         """Anisotropic T60 should produce non-diagonal T_i (cross-SH coupling)."""
         K = 60
-        azimuths = np.linspace(0, 2 * np.pi, K, endpoint=False)
-        elevations = np.zeros(K)
-        t60_ms = 400.0 + 400.0 * np.cos(azimuths)  # strong anisotropy
+        azimuths, elevations = uniform_directions(K)
+        # 3:1, but bounded away from zero: a T60 that reaches 0 makes the decay
+        # gain non-band-limited, and no finite grid satisfies Eq. 35 for it.
+        t60_ms = 600.0 + 300.0 * np.cos(azimuths)
         group_lengths = np.array([521])
 
         tw = DirectionalWeighting(
@@ -387,13 +260,6 @@ class TestDirectionalWeighting:
 # Plane-Wave DFDN (ICASSP 2020)
 # ======================================================================
 
-from src.fdn.planewave_dfdn import (
-    EarlyReflectionModule,
-    PlaneWaveDFDN,
-    Reflection,
-)
-
-
 class TestPlaneWaveDFDN:
     """Tests for the ICASSP 2020 Plane-Wave Domain DFDN."""
 
@@ -408,7 +274,6 @@ class TestPlaneWaveDFDN:
             sample_rate=48000,
             num_delay_line_groups=N,
             sh_order=L,
-            frame_size=64,
             seed=seed,
         )
         pw.setup(
@@ -469,7 +334,6 @@ class TestPlaneWaveDFDN:
             sample_rate=48000,
             num_delay_line_groups=4,
             sh_order=1,
-            frame_size=64,
             seed=42,
         )
         # Init grid first to learn actual Q (t-design may differ from (L+1)²)
@@ -493,17 +357,15 @@ class TestPlaneWaveDFDN:
             sample_rate=48000,
             num_delay_line_groups=4,
             sh_order=1,
-            frame_size=64,
             seed=42,
         )
-        freqs = np.array([125, 500, 2000, 8000], dtype=float)
-        t60_ms = np.array([1200, 1000, 800, 600], dtype=float)  # (n_bands,)
+        # On the GEQ grid: [DC, 63, 125, 250, 500, 1k, 2k, 4k, 8k, fs].
+        t60_ms = np.array(
+            [1200.0, 1200, 1200, 1100, 1000, 900, 800, 700, 600, 300]
+        )
         pw.setup(
             delay_range_ms=(10, 30),
             t60_per_direction_ms=t60_ms,
-            freqs=freqs,
-            filter_order=4,
-            warp_factor=0.6,
         )
         rir = pw.render(0.0, 0.0, length_seconds=0.5)
         assert rir.shape[0] == 4
@@ -514,49 +376,75 @@ class TestPlaneWaveDFDN:
             sample_rate=48000,
             num_delay_line_groups=4,
             sh_order=1,
-            frame_size=64,
             seed=42,
         )
         # Init grid first to learn actual Q
         pw._init_grid()
         Q = pw.Q
         Q_ambi = (pw.sh_order + 1) ** 2
-        freqs = np.array([125, 500, 2000, 8000], dtype=float)
         t60_2d = np.linspace(
-            [1000, 800, 600, 400],
-            [700, 500, 300, 150],
+            [1000, 1000, 1000, 900, 800, 700, 600, 500, 400, 200],
+            [700, 700, 700, 620, 540, 460, 380, 300, 220, 100],
             Q,
-        ).astype(float)  # (Q, n_bands)
+        ).astype(float)  # (Q, 10)
         pw.setup(
             delay_range_ms=(10, 30),
             t60_per_direction_ms=t60_2d,
-            freqs=freqs,
-            filter_order=4,
-            warp_factor=0.7,
         )
         rir = pw.render(0.0, 0.0, length_seconds=0.5)
         assert rir.shape[0] == Q_ambi
 
-    def test_reset(self):
+    def test_repeat_render_is_deterministic(self):
         pw = self._make()
         rir1 = pw.render(0.0, 0.0, length_seconds=0.2)
-        pw.reset()
         rir2 = pw.render(0.0, 0.0, length_seconds=0.2)
         np.testing.assert_allclose(rir1, rir2, atol=1e-12)
 
 
 class TestEarlyReflections:
-    def test_er_module_shape(self):
-        sh_order = 1
-        n_ambi = (sh_order + 1) ** 2
+    def test_er_grid_signal_is_vbap_panned(self):
+        """Eqs. 4-5: each reflection lands on the grid, at its own delay,
+        panned toward its own direction."""
+        pw = PlaneWaveDFDN(
+            sample_rate=48000, num_delay_line_groups=4, sh_order=1,
+            seed=42,
+        )
+        pw.setup(delay_range_ms=(10, 30), t60_per_direction_ms=800.0)
+
         refs = [
             Reflection(gain=0.8, azimuth=0.0, elevation=0.0, delay_samples=100),
             Reflection(gain=0.5, azimuth=np.pi, elevation=0.0, delay_samples=200),
         ]
-        er = EarlyReflectionModule(refs, sh_order)
-        assert len(er.sh_vectors) == 2
-        for sh_vec in er.sh_vectors:
-            assert sh_vec.shape == (n_ambi,)
+        pw.set_early_reflections(refs)
+
+        impulse = np.zeros((1, 400))
+        impulse[0, 0] = 1.0
+        grid = pw._build_er_grid_signal(impulse, 400)
+
+        assert grid.shape == (pw.Q, 400)
+
+        # Energy appears only at the two arrival times.
+        active = np.flatnonzero(np.any(np.abs(grid) > 1e-12, axis=0))
+        np.testing.assert_array_equal(active, [100, 200])
+
+        # VBAP puts unit-sum weights on the hull face containing the target,
+        # so each column sums to the reflection's gain.
+        assert grid[:, 100].sum() == pytest.approx(0.8)
+        assert grid[:, 200].sum() == pytest.approx(0.5)
+
+        # ...and weights the grid point nearest the target most heavily.
+        for ref, sample in zip(refs, (100, 200), strict=True):
+            target = np.array([
+                np.cos(ref.elevation) * np.cos(ref.azimuth),
+                np.cos(ref.elevation) * np.sin(ref.azimuth),
+                np.sin(ref.elevation),
+            ])
+            grid_vecs = np.stack([
+                np.cos(pw.grid_elevations) * np.cos(pw.grid_azimuths),
+                np.cos(pw.grid_elevations) * np.sin(pw.grid_azimuths),
+                np.sin(pw.grid_elevations),
+            ])
+            assert np.argmax(grid[:, sample]) == np.argmax(target @ grid_vecs)
 
     def test_er_injection(self):
         """Early reflections should appear at their expected delay times."""
@@ -564,13 +452,11 @@ class TestEarlyReflections:
             sample_rate=48000,
             num_delay_line_groups=4,
             sh_order=1,
-            frame_size=64,
             seed=42,
         )
         pw.setup(delay_range_ms=(10, 30), t60_per_direction_ms=800.0)
         rir_no_er = pw.render(0.0, 0.0, length_seconds=0.5)
 
-        pw.reset()
         er_delay = 200  # samples
         pw.set_early_reflections([
             Reflection(gain=0.9, azimuth=0.0, elevation=0.0, delay_samples=er_delay),
@@ -596,8 +482,10 @@ class TestAirAbsorptionAccounting:
     reports when the target is not achievable in air.
     """
 
-    freqs = np.array([125.0, 500.0, 2000.0, 8000.0])
-    t60_ms = np.array([1000.0, 1100.0, 1000.0, 900.0])
+    freqs = geq_band_frequencies()
+    t60_ms = np.array(
+        [1000.0, 1000, 1000, 1100, 1000, 1000, 950, 900, 900, 400]
+    )
 
     @staticmethod
     def _realised_t60_ms(pw, freqs):
@@ -619,30 +507,38 @@ class TestAirAbsorptionAccounting:
             sample_rate=48000,
             num_delay_line_groups=4,
             sh_order=1,
-            frame_size=64,
             seed=42,
         )
         pw.setup(
             delay_range_ms=(10, 30),
             t60_per_direction_ms=self.t60_ms if t60_ms is None else t60_ms,
-            freqs=self.freqs,
-            filter_order=6,
             air_absorption=air,
         )
         return pw
 
     def test_air_absorption_shortens_realised_t60(self):
-        """Toggling air absorption must shorten the decay, most at HF.
+        """Air must shorten the decay where it acts, and leave the bottom alone.
+
+        Measured at the eight peaking-band centres rather than the full grid:
+        the outer two points are interpolation anchors, and ``sosfreqz`` at fs
+        wraps to DC, so probing there reports the DC value again.
+
+        The claim is deliberately not "shorter in every band". The GEQ is a
+        single global least-squares fit, so steepening the high shelf -- air
+        takes the fs anchor from 400 ms to under 90 ms -- shifts neighbouring
+        bands by a few percent in either direction. What must hold is that the
+        bands where air actually acts get clearly shorter while the bottom of
+        the range does not move much.
 
         Compared against air=False rather than the target so that the
         (separate) filter-fitting error cancels out.
         """
-        off = self._realised_t60_ms(self._make(False), self.freqs)
-        on = self._realised_t60_ms(self._make(True), self.freqs)
-        assert np.all(on <= off * (1.0 + 1e-9))
-        # 125 Hz is barely touched; 8 kHz clearly is.
-        assert on[0] == pytest.approx(off[0], rel=0.01)
-        assert on[-1] < off[-1] * 0.85
+        bands = self.freqs[1:9]                    # 63 Hz to 8 kHz
+        off = self._realised_t60_ms(self._make(False), bands)
+        on = self._realised_t60_ms(self._make(True), bands)
+        assert on[-1] < off[-1] * 0.85             # 8 kHz
+        assert on[-2] < off[-2] * 0.90             # 4 kHz
+        assert on[0] == pytest.approx(off[0], rel=0.05)   # 63 Hz
 
     def test_shares_account_for_the_realised_decay(self):
         """air_db + boundary_db must equal the loss the realised T60 needs."""
@@ -663,9 +559,10 @@ class TestAirAbsorptionAccounting:
         model an unreachable target is not an error to report, it is simply
         pulled down toward what the medium allows.
         """
-        from src.fdn.planewave_dfdn import air_absorption_t60
+        from src.fdn.room import air_absorption_t60
 
-        t60 = np.array([1000.0, 1100.0, 1000.0, 5000.0])
+        t60 = self.t60_ms.copy()
+        t60[-1] = 5000.0
         pw = self._make(True, t60_ms=t60)
         ceiling = air_absorption_t60(self.freqs)[-1]
         realised_top = pw.realised_t60_s[:, -1].mean()

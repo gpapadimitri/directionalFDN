@@ -1,85 +1,52 @@
 from __future__ import annotations
 
 import numpy as np
+import spharpy
 from numpy.typing import NDArray
 from pyfar import Coordinates
-import spharpy
-
-
-def acn_to_lm(acn: int) -> tuple[int, int]:
-    """Convert an ACN index to degree *l* and order *m*.
-
-    ACN 0 → (0, 0), 1 → (1, −1), 2 → (1, 0), 3 → (1, 1), …
-    """
-    n, m = spharpy.spherical.acn_to_nm(acn)
-    return int(n), int(m)
-
-
-def num_channels(order: int) -> int:
-    """Number of Ambisonics channels for a given order: *(L+1)²*."""
-    return (order + 1) ** 2
-
-
-def encode_direction(
-    azimuth: float,
-    elevation: float,
-    order: int = 1,
-) -> NDArray:
-    """Encode a single direction as ACN/SN3D Ambisonics coefficients.
-
-    Uses spharpy's real spherical harmonics with SN3D normalisation.
-    The zeroth-order coefficient (W) equals ``1 / √(4π)`` for any
-    direction, consistent with the AmbiX convention.
-
-    Parameters
-    ----------
-    azimuth : float
-        Azimuth in **radians** (0 = front, π/2 = left).
-    elevation : float
-        Elevation in **radians** (0 = horizontal, π/2 = up).
-    order : int
-        Maximum Ambisonics order.
-
-    Returns
-    -------
-    NDArray, length (order+1)²
-        SN3D coefficient vector.
-    """
-    coords = Coordinates.from_spherical_elevation(azimuth, elevation, 1.0)
-    Y = spharpy.spherical.spherical_harmonic_basis_real(
-        order, coords, normalization="SN3D"
-    )
-    return Y.ravel()
 
 
 def encode_directions(
-    azimuths: NDArray,
-    elevations: NDArray,
+    azimuths: float | NDArray,
+    elevations: float | NDArray,
     order: int = 1,
 ) -> NDArray:
-    """Encode an array of directions.
+    """Encode one or more directions as ACN/SN3D Ambisonics coefficients.
+
+    The zeroth-order coefficient (W) equals ``1`` for any direction, which
+    is what AmbiX means by SN3D.
+
+    Note the spharpy spelling: its ``"SN3D"`` is rooted in the orthonormal
+    basis and carries a ``1 / sqrt(4 pi)`` that AmbiX does not, so every
+    coefficient would come back 11 dB low.  ``"SNM"`` is the Schmidt
+    semi-normalisation without it, and is the one AmbiX calls SN3D.
 
     Parameters
     ----------
-    azimuths, elevations : NDArray
-        Angles in radians, same length *D*.
+    azimuths : float or NDArray
+        Azimuth in **radians** (0 = front, π/2 = left).
+    elevations : float or NDArray
+        Elevation in **radians** (0 = horizontal, π/2 = up).  Broadcast
+        against *azimuths*.
     order : int
         Maximum Ambisonics order.
 
     Returns
     -------
-    NDArray, shape (D, (order+1)²)
-        SN3D coefficient matrix.
+    NDArray, shape ``np.shape(azimuths) + ((order+1)²,)``
+        SN3D coefficients: a vector for one direction, a ``(D, (order+1)²)``
+        matrix for *D*.
     """
-    azimuths = np.asarray(azimuths, dtype=float)
-    elevations = np.asarray(elevations, dtype=float)
+    azimuths, elevations = np.broadcast_arrays(
+        np.asarray(azimuths, dtype=float), np.asarray(elevations, dtype=float)
+    )
     coords = Coordinates.from_spherical_elevation(
-        azimuths, elevations, np.ones_like(azimuths)
+        azimuths.ravel(), elevations.ravel(), 1.0
     )
     Y = spharpy.spherical.spherical_harmonic_basis_real(
-        order, coords, normalization="SN3D"
+        order, coords, normalization="SNM"
     )
-    return Y
+    return Y.reshape(azimuths.shape + (-1,))
 
 
 def uniform_directions(n: int) -> tuple[NDArray, NDArray]:
@@ -99,10 +66,17 @@ def uniform_directions(n: int) -> tuple[NDArray, NDArray]:
 def quadrature_grid(order: int) -> tuple[NDArray, NDArray]:
     """Return a spherical quadrature grid suitable for SH order *order*.
 
-    Uses ``spharpy.samplings.t_design`` with ``n_max=2*order`` so that
-    the grid provides exact quadrature for products of order-*L*
-    spherical harmonics (needed for the discrete SN3D orthogonality
-    condition ``Y^T Y · (4π/Q) = diag(1/(2l+1))``).
+    A t-design of degree ``t = 2L``, which is what ICASSP 2020 Sec. 3 asks
+    for -- "at least Q >= (L+1)^2 uniform points, such as spherical t-designs
+    of degree t = 2L" -- and what the discrete SN3D orthogonality condition
+    ``Y^T Y · (4π/Q) = diag(4π/(2l+1))`` needs to hold exactly.
+
+    ``spharpy``'s *n_max* is already an SH order, doubled to a degree inside
+    the library, so it takes *order* rather than ``2 * order``.  Passing the
+    doubled value asks for degree ``4L``: at order 3 that is 86 points where
+    26 suffice, and the delay-line count of a plane-wave DFDN scales with it.
+    The orthogonality error is identical either way, and slightly worse on
+    the larger grid, there being more points to sum over.
 
     Parameters
     ----------
@@ -116,7 +90,7 @@ def quadrature_grid(order: int) -> tuple[NDArray, NDArray]:
     """
     if order < 1:
         raise ValueError(f"quadrature_grid requires order >= 1, got {order}")
-    coords = spharpy.samplings.t_design(n_max=2 * order)
+    coords = spharpy.samplings.t_design(n_max=order)
     return np.asarray(coords.azimuth), np.asarray(coords.elevation)
 
 

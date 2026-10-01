@@ -23,7 +23,22 @@ ms_to_samps = pyFDN.ms_to_smp
 # T30 reverberation time estimation & plotting
 # ---------------------------------------------------------------------------
 
-OCTAVE_BANDS = np.array([125, 250, 500, 1000, 2000, 4000, 8000])
+#: Octave-band centres for *analysis* -- the band T60 estimate and the plots.
+#:
+#: 16 kHz is in and 62.5 Hz is out.  Air absorption does nearly all its work in
+#: the top band, while 62.5 Hz sits below what a delay range bracketing the
+#: mean free path resolves, and its Schroeder fit is dominated by the modal
+#: sparsity of the network rather than by the absorption design.
+#:
+#: These are the top eight points of the graphic EQ's design grid (see
+#: :func:`~src.fdn.fdn_components.geq_band_frequencies`), so a measurement
+#: lines up with a ten-value target index for index as ``target[2:]``.
+OCTAVE_BANDS = np.array(
+    [125, 250, 500, 1000, 2000, 4000, 8000, 16000], dtype=float
+)
+
+#: Reference centre for the octave grid; pyFDN counts bands in octaves from it.
+_BAND_REF_HZ = 1000.0
 
 
 
@@ -69,7 +84,7 @@ def estimate_t30(ir: NDArray, fs: float, bands: NDArray = OCTAVE_BANDS) -> NDArr
 def plot_t30(ir: NDArray, fs: float) -> None:
     """Plot octave-band reverberation time from a *synthesised* impulse response.
 
-    Uses :func:`estimate_t60_bands`, i.e. pyFDN's Schroeder fit over its own
+    Uses :func:`pyFDN.estimate_rt_bands`, i.e. pyFDN's Schroeder fit over its own
     octave filterbank.  For a *measured* response prefer :func:`estimate_t30`,
     whose Chu-Lundeby estimator subtracts the measurement noise floor.
 
@@ -80,7 +95,9 @@ def plot_t30(ir: NDArray, fs: float) -> None:
     fs : float
         Sample rate in Hz.
     """
-    t60, f_centre = estimate_t60_bands(ir, fs)
+    t60, f_centre = pyFDN.estimate_rt_bands(
+        ir, fs, start=_band_start(OCTAVE_BANDS), n=len(OCTAVE_BANDS)
+    )
 
     fig, ax = plt.subplots(figsize=(7, 4))
     labels = [f"{fc:.0f}" if fc < 1000 else f"{fc / 1000:.0f}k" for fc in f_centre]
@@ -121,7 +138,7 @@ def plot_edc(ir: NDArray, fs: float) -> None:
 
     Built on pyFDN's :func:`~pyFDN.edc`, :func:`~pyFDN.octave_bands` and
     :func:`~pyFDN.octave_band_filterbank`, so the band edges and the decay
-    curve match what :func:`estimate_t60_bands` fits its slopes to.
+    curve match what :func:`pyFDN.estimate_rt_bands` fits its slopes to.
 
     Parameters
     ----------
@@ -139,7 +156,12 @@ def plot_edc(ir: NDArray, fs: float) -> None:
     fig, ax = plt.subplots(figsize=(7, 4))
     ax.plot(t, _db(pyFDN.edc(ir)), color="black", linewidth=1.5, label="Broadband")
 
-    bands, f_centre = pyFDN.octave_bands(fc=1000.0, start=-4, n=8, fs=fs)
+    bands, f_centre = pyFDN.octave_bands(
+        fc=_BAND_REF_HZ,
+        start=_band_start(OCTAVE_BANDS),
+        n=len(OCTAVE_BANDS),
+        fs=fs,
+    )
     sos_bank = pyFDN.octave_band_filterbank(bands, fs)
     cmap = plt.cm.coolwarm(np.linspace(0, 1, len(f_centre)))
     for i, (fc, sos) in enumerate(zip(f_centre, sos_bank, strict=True)):
@@ -191,162 +213,54 @@ def plot_frequency_response(x, fs, smooth=3):
     plt.show()
 
 
-def estimate_t60_bands(
-    ir: NDArray, fs: float
-) -> tuple[NDArray, NDArray]:
-    """Octave-band T60 by Schroeder-curve fit, without noise compensation.
-
-    Preferred over :func:`estimate_t30` for *synthesised* impulse responses,
-    which have no noise floor: the linear fit runs from -5 dB over 30 dB and is
-    extrapolated to 60 dB.  For *measured* responses keep :func:`estimate_t30`,
-    whose Chu-Lundeby estimator subtracts the measurement noise floor.
-
-    Parameters
-    ----------
-    ir : NDArray
-        Single-channel impulse response.
-    fs : float
-        Sample rate in Hz.
-
-    Returns
-    -------
-    rt : NDArray, shape (8,)
-        T60 in seconds at 62.5 Hz to 8 kHz.
-    f_centre : NDArray, shape (8,)
-        Band centre frequencies in Hz.
-    """
-    return pyFDN.estimate_rt_bands(np.asarray(ir).ravel(), fs, n=8, start=-4)
+def _band_start(bands: NDArray) -> float:
+    """Octave offset of *bands*[0] from :data:`_BAND_REF_HZ`, as pyFDN wants it."""
+    return float(np.log2(np.asarray(bands, dtype=float)[0] / _BAND_REF_HZ))
 
 
-def mixing_time_ms(ir: NDArray, fs: float, pre_delay: int = 0) -> float:
-    """Mixing time in milliseconds (Abel and Huang 2006 echo density).
+def energy_decay_deviation(directional_irs: NDArray) -> NDArray:
+    """Energy decay deviation per direction, in dB against time.
 
-    The time at which the normalised echo density first reaches 1, i.e. when
-    the response becomes indistinguishable from Gaussian noise.  This is the
-    quantitative answer to whether a DFDN tail is actually diffuse, which is
-    what the ``scattering_amount`` and ``lateral_mix`` parameters are for.
+    Alary et al., J. Acoust. Soc. Am. 149(5), 2021, Eqs. 4-7: each
+    direction's energy decay curve in dB, minus the mean taken across
+    directions at the same instant.  Zero everywhere is an isotropic decay;
+    a spread that holds open is an anisotropic one; a spread that closes as
+    the tail develops is anisotropy relaxing into diffusion, which a single
+    T60 per direction cannot show -- the fitting window averages straight
+    across it and reports one number or the other.
 
     Parameters
     ----------
-    ir : NDArray
-        Single-channel impulse response, at least ~100 ms long.
-    fs : float
-        Sample rate in Hz.
-    pre_delay : int
-        Onset offset in samples to measure from.
+    directional_irs : NDArray, shape (num_directions, num_samples)
+        One impulse response per direction, already decomposed.  Beamforming
+        is the caller's, since the beam pattern sets how much of the true
+        deviation survives the analysis (Alary et al. 2021, Sec. II A) --
+        pass :meth:`~src.fdn.planewave_dfdn.PlaneWaveDFDN.render`'s
+        ``grid_output`` to leave it out of the measurement entirely.
 
     Returns
     -------
-    float
-        Mixing time in ms, or ``nan`` if the response never reaches the
-        threshold.  ``pyFDN.echo_density`` reports that case as 0.0, which
-        would read as "instantly mixed"; nan is the honest value for
-        "undefined" and keeps comparisons from silently inverting.
+    NDArray, shape (num_directions, num_samples)
+        Deviation in dB.  Sums to zero across directions at every instant.
     """
-    import warnings
-
-    # Coupled to pyFDN.echo_density's exact wording: this is the only way to
-    # distinguish "never reached threshold" from an ordinary 0.0 result, since
-    # echo_density reports both the same way otherwise. Any other warning it
-    # raises is re-emitted below rather than silently swallowed.
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        t_abel, _ = pyFDN.echo_density(
-            np.asarray(ir).ravel(), n=1024, fs=fs, pre_delay=pre_delay
+    irs = np.asarray(directional_irs, dtype=float)
+    if irs.ndim != 2:
+        raise ValueError(
+            f"Expected (num_directions, num_samples), got shape {irs.shape}."
         )
-    not_found = False
-    for w in caught:
-        if "Mixing time not found" in str(w.message):
-            not_found = True
-        else:
-            warnings.warn_explicit(
-                w.message, w.category, w.filename, w.lineno
-            )
-    if not_found:
-        return float("nan")
-    return float(t_abel)
-
-
-
-def pole_bounds(
-    delays: NDArray,
-    sos: NDArray,
-    feedback_matrix: NDArray,
-    fs: float,
-    nfft: int = 2**12,
-) -> tuple[NDArray, NDArray, NDArray]:
-    """Bounds on the FDN loop's pole magnitudes against frequency.
-
-    A stable, correctly-absorbing FDN keeps the upper curve below 1 everywhere.
-    With per-direction absorption filters that is a real design check, since
-    the single-channel intuition does not carry over.
-
-    This reimplements :func:`pyFDN.pole_boundaries` from the SOS cascade rather
-    than calling it.  That function needs a direct-form ``(b, a)`` pair per
-    channel, and flattening an 11-section cascade with ``scipy.signal.sos2tf``
-    is numerically indefensible at order 22: the flattened response reports a
-    peak magnitude of 5.69 where the cascade's true peak is 0.92, and picks up
-    a pole at 1.13 that the cascade does not have.  The maths below is the
-    same; only the route to the filter response differs.
-
-    Parameters
-    ----------
-    delays : NDArray, shape (N,)
-        Delay-line lengths in samples.
-    sos : NDArray, shape (n_sections, 6, N)
-        Per-channel absorption SOS bank, as returned by
-        :func:`src.fdn.absorption_design.design_absorption_sos`.
-    feedback_matrix : NDArray, shape (N, N) or (N, N, order)
-        Scalar or FIR-polynomial feedback matrix.
-    fs : float
-        Sample rate in Hz.
-    nfft : int
-        Number of frequency points from DC to Nyquist.
-
-    Returns
-    -------
-    min_curve, max_curve : NDArray, shape (nfft,)
-        Lower and upper bounds on pole magnitude.
-    freqs : NDArray, shape (nfft,)
-        Frequencies in Hz.
-    """
-    from scipy.signal import sosfreqz
-
-    delays_arr = np.asarray(delays, dtype=float).ravel()
-    sos_arr = np.asarray(sos, dtype=float)
-    if sos_arr.ndim != 3 or sos_arr.shape[1] != 6:
-        raise ValueError("sos must have shape (n_sections, 6, N)")
-    num = delays_arr.size
-    if sos_arr.shape[2] != num:
-        raise ValueError("sos must carry one cascade per delay line")
-
-    omega = np.linspace(0.0, np.pi, nfft)
-
-    # Feedback-matrix singular values per bin.  A scalar matrix is frequency
-    # independent, so its curves are flat.
-    A = np.asarray(feedback_matrix, dtype=float)
-    if A.ndim == 2:
-        A = A[:, :, np.newaxis]
-    A_w = np.fft.fft(A, n=2 * nfft, axis=2)[:, :, :nfft]
-    sv_min = np.empty(nfft)
-    sv_max = np.empty(nfft)
-    for k in range(nfft):
-        s = np.linalg.svd(A_w[:, :, k], compute_uv=False)
-        sv_min[k] = np.min(np.abs(s)) ** (1.0 / delays_arr.min())
-        sv_max[k] = np.max(np.abs(s)) ** (1.0 / delays_arr.max())
-
-    # Per-channel absorption, as a gain per sample of the loop it sits in.
-    # The group delay is differentiated from the cascade's own unwrapped phase
-    # rather than taken from a flattened transfer function.
-    per_sample = np.empty((nfft, num))
-    for i in range(num):
-        _, h = sosfreqz(sos_arr[:, :, i], worN=omega)
-        group_delay = -np.gradient(np.unwrap(np.angle(h)), omega)
-        loop = np.maximum(delays_arr[i] + group_delay, 1.0)
-        per_sample[:, i] = np.abs(h) ** (1.0 / loop)
-
-    return (
-        per_sample.min(axis=1) * sv_min,
-        per_sample.max(axis=1) * sv_max,
-        omega / np.pi * fs / 2.0,
+    if irs.shape[0] < 2:
+        raise ValueError(
+            "The deviation needs at least two directions to have a mean to "
+            "deviate from; one direction is its own mean."
+        )
+    edc_db = 10.0 * np.log10(
+        np.stack([pyFDN.edc(row) for row in irs]) + 1e-30
     )
+    return edc_db - edc_db.mean(axis=0)
+
+
+#: Bounds on the FDN loop's pole magnitudes against frequency.  Takes the
+#: absorption as the ``(n_sections, 6, N)`` bank of
+#: :func:`src.fdn.fdn_components.design_absorption_sos` and works from the
+#: cascade, not a flattened transfer function.
+pole_bounds = pyFDN.pole_boundaries

@@ -6,8 +6,6 @@ dist/
 build/
 *.so
 
-examples/
-
 # Papers
 papers/
 
@@ -20,3 +18,9 @@ papers/
 # IDE
 .vscode/
 .idea/
+
+# Archived code, kept locally only (see its header)
+deprecated.py
+
+# Rendered impulse responses
+renders/
