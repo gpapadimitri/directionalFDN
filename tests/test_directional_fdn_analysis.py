@@ -5,7 +5,13 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from src.analysis import decay_fit, predicted_beam_decay, sh_to_beams
+from src.analysis import (
+    band_correlation,
+    decay_fit,
+    mean_offdiag_abs,
+    predicted_beam_decay,
+    sh_to_beams,
+)
 from src.fdn import spatial
 from src.fdn.directional_fdn import DirectionalFDN
 
@@ -47,3 +53,42 @@ def test_beam_t30_matches_prediction_not_the_map():
     assert np.median(np.abs(rel)) < 0.03, np.median(np.abs(rel))
     #order-3 front beams read about 1.38 s against their 0.6 s target
     assert np.median(predicted[front, 0]) > 1.2
+
+
+T60_CMD = np.array([1200.0, 1200, 1200, 1100, 1000, 900, 800, 700, 600, 600])
+
+
+def test_grid_channels_are_uncorrelated():
+    #Gallien et al. 2026 Sec. 3.2.2 matching to uncorrelated plane waves would be
+    #the identity: the per-direction loops sit at the estimation floor
+    grid = _make(T60_CMD).render(0.0, 0.0, 1.5, direct_gain=0.0, grid_output=True)
+    rng = np.random.default_rng(7)
+    n = np.arange(grid.shape[1])
+    floor = rng.standard_normal(grid.shape) * 10.0 ** (-3.0 * n / FS)
+    ratio = mean_offdiag_abs(band_correlation(grid, FS, BANDS)) / mean_offdiag_abs(
+        band_correlation(floor, FS, BANDS)
+    )
+    #probe, seeds 3-5: 0.79-1.35
+    assert np.all(ratio < 1.5), ratio
+
+
+def test_natural_initial_power_is_flat():
+    grid = _make(T60_CMD).render(0.0, 0.0, 2.0, direct_gain=0.0, grid_output=True)
+    _, p0 = decay_fit(grid, FS, BANDS, "T20")
+    med = np.nanmedian(p0, axis=0)[2:]
+    #probe, seeds 3-5: 0.58-1.04 dB from 250 Hz
+    assert np.ptp(med) < 1.5, med
+
+
+def test_grid_t30_matches_target():
+    grid = _make(T60_CMD).render(0.0, 0.0, 2.5, direct_gain=0.0, grid_output=True)
+    t30, _ = decay_fit(grid, FS, BANDS, "T30")
+    rel = np.median(t30, axis=0) / (T60_CMD[1:9] * 1e-3) - 1.0
+    #probe, seeds 3-5: within 3 %; the 8 kHz octave integrates a falling target
+    assert np.all(np.abs(rel) < 0.05), rel
+
+
+def test_same_seed_is_bit_identical():
+    a = _make(T60_CMD, seed=11).render(0.3, 0.1, 0.5)
+    b = _make(T60_CMD, seed=11).render(0.3, 0.1, 0.5)
+    assert np.array_equal(a, b)
