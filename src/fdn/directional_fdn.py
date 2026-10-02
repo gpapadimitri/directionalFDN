@@ -481,6 +481,13 @@ class DirectionalFDN:
         )
         self._encoding_matrix = Y.T  # ((L_out+1)^2, Q)
 
+    @property
+    def encoding_matrix(self) -> NDArray:
+        """Grid-to-Ambisonics encoder E (Eq. 13), shape ((L_out+1)^2, Q)."""
+        if self._encoding_matrix is None:
+            raise RuntimeError("Call setup() before reading encoding_matrix.")
+        return self._encoding_matrix
+
     # ==================================================================
     # Kronecker feedback
     # ==================================================================

@@ -13,6 +13,8 @@ from numpy.typing import NDArray
 from pyrato.edc import schroeder_integration
 from pyrato.parameters import reverberation_time_linear_regression
 
+from .fdn import spatial
+
 #pyrato's ISO 3382 intervals, needed here for the truncation guard
 _DECAY_INTERVALS_DB = {"EDT": (-0.1, -10.1), "T20": (-5.0, -25.0), "T30": (-5.0, -35.0)}
 
@@ -116,3 +118,65 @@ def mean_offdiag_abs(r: NDArray) -> NDArray:
     """Mean absolute off-diagonal entry of each matrix in a (B, C, C) stack."""
     mask = ~np.eye(r.shape[-1], dtype=bool)
     return np.abs(r[:, mask]).mean(axis=-1)
+
+
+def sh_to_beams(sh: NDArray, azimuths: NDArray, elevations: NDArray) -> NDArray:
+    """Max-DI plane-wave decomposition of an AmbiX ACN/SN3D signal, shape (D, n).
+
+    Unit gain toward a unit plane wave's own direction.
+    """
+    order = int(np.sqrt(sh.shape[0])) - 1
+    y = spatial.encode_directions(azimuths, elevations, order).reshape(-1, (order + 1) ** 2)
+    degree = np.floor(np.sqrt(np.arange((order + 1) ** 2))).astype(int)
+    return (y * (2 * degree + 1) / (order + 1) ** 2) @ sh
+
+
+def predicted_beam_decay(
+    beam_from_grid: NDArray,
+    t60_ms: NDArray,
+    p0_db: NDArray,
+    fs: float,
+    length_s: float,
+    parameter: str = "T30",
+) -> NDArray:
+    """Decay time each beam should read if every grid direction met its target.
+
+    Grid channels are mutually uncorrelated, so a beam's EDC is the
+    power-weighted sum of the grid channels' exponential EDCs. At low order
+    the sidelobes let slow directions own the late EDC, so compare beams with
+    this, never with the raw map.
+
+    Parameters
+    ----------
+    beam_from_grid : NDArray, shape (D, Q)
+        E.g. ``sh_to_beams(pw.encoding_matrix, az, el)``.
+    t60_ms, p0_db : NDArray, shape (Q, B)
+        Target T60 (ms) and relative initial power (dB) per grid direction.
+    fs : float
+    length_s : float
+        Rendered length, so the prediction has the same truncation.
+    parameter : {"EDT", "T20", "T30"}
+
+    Returns
+    -------
+    NDArray, shape (D, B)
+        Predicted decay time in seconds.
+    """
+    if parameter not in _DECAY_INTERVALS_DB:
+        raise ValueError(
+            f"parameter must be one of {sorted(_DECAY_INTERVALS_DB)}, got {parameter!r}."
+        )
+    t = np.arange(int(length_s * fs)) / fs
+    weights = np.asarray(beam_from_grid, dtype=float) ** 2
+    t60_ms = np.asarray(t60_ms, dtype=float)
+    out = np.empty((weights.shape[0], t60_ms.shape[1]))
+    for k in range(t60_ms.shape[1]):
+        tau = t60_ms[:, k] * 1e-3 / (6.0 * np.log(10.0))
+        power = 10.0 ** (np.asarray(p0_db, dtype=float)[:, k] / 10.0)
+        decay = np.exp(-t / tau[:, np.newaxis]) - np.exp(-t[-1] / tau[:, np.newaxis])
+        edc = weights @ ((power * tau)[:, np.newaxis] * decay)
+        with np.errstate(divide="ignore"):
+            out[:, k] = reverberation_time_linear_regression(
+                pf.TimeData(edc / edc[:, :1], t), T=parameter
+            )
+    return out

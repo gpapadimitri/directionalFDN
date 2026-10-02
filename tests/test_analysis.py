@@ -11,7 +11,10 @@ from src.analysis import (
     band_energy,
     decay_fit,
     mean_offdiag_abs,
+    predicted_beam_decay,
+    sh_to_beams,
 )
+from src.fdn import spatial
 
 FS = 48000
 BANDS = np.array([62.5, 125.0, 250.0, 500.0, 1000.0, 2000.0, 4000.0, 8000.0])
@@ -85,3 +88,25 @@ def test_band_correlation_identical_and_independent_channels():
     m = mean_offdiag_abs(band_correlation(_decaying_noise(8, 1.0, 1.0, seed=7), FS, BANDS))
     assert m.shape == (8,)
     assert np.all(m[4:] < 0.1), m
+
+
+def test_sh_to_beams_has_unit_gain_toward_a_plane_wave():
+    az, el = spatial.quadrature_grid(3)
+    sh = spatial.encode_directions(0.7, 0.3, 3)[:, np.newaxis]
+    beams = sh_to_beams(sh, np.r_[0.7, az], np.r_[0.3, el])
+    assert beams.shape == (1 + az.size, 1)
+    assert np.isclose(beams[0, 0], 1.0)
+    assert np.all(beams[1:, 0] < 1.0)
+
+
+def test_predicted_beam_decay_with_identity_beams_returns_target():
+    t60 = np.array([[500.0], [1000.0], [2000.0]])
+    pred = predicted_beam_decay(np.eye(3), t60, np.zeros_like(t60), FS, 6.0)
+    assert np.allclose(pred[:, 0], [0.5, 1.0, 2.0], rtol=0.01)
+
+
+def test_predicted_beam_decay_sidelobe_pulls_toward_slow_direction():
+    t60 = np.array([[600.0], [1500.0]])
+    pred = predicted_beam_decay(np.array([[1.0, 0.3]]), t60, np.zeros_like(t60), FS, 4.0)
+    #a -10 dB sidelobe on the slow direction owns most of the T30 window
+    assert 0.9 < pred[0, 0] < 1.5
