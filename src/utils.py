@@ -264,3 +264,64 @@ def energy_decay_deviation(directional_irs: NDArray) -> NDArray:
 #: :func:`src.fdn.fdn_components.design_absorption_sos` and works from the
 #: cascade, not a flattened transfer function.
 pole_bounds = pyFDN.pole_boundaries
+
+
+def plot_directional_t60(
+    t60_s: NDArray,
+    bands: NDArray,
+    target_ms: NDArray | None = None,
+    ylabel: str = "T60 (s)",
+) -> None:
+    """Per-direction decay times (thin), median (bold), as Gallien et al. Fig. 5."""
+    fig, ax = plt.subplots(figsize=(7, 4))
+    x = np.arange(len(bands))
+    ax.plot(x, np.asarray(t60_s).T, color="0.7", linewidth=0.6)
+    ax.plot(x, np.nanmedian(t60_s, axis=0), color="black", linewidth=2.0, label="median")
+    if target_ms is not None:
+        ax.plot(x, np.asarray(target_ms) * 1e-3, "r--", label="target")
+    ax.set_xticks(x)
+    ax.set_xticklabels([f"{f:g}" for f in bands])
+    ax.set_xlabel("Frequency (Hz)")
+    ax.set_ylabel(ylabel)
+    ax.legend()
+    ax.grid(alpha=0.3)
+    plt.tight_layout()
+    plt.show()
+
+
+def plot_directional_map(
+    azimuths: NDArray, elevations: NDArray, values: NDArray, label: str,
+) -> None:
+    """One value per direction on an azimuth/elevation map, as in Gallien et al. Fig. 6."""
+    fig, ax = plt.subplots(figsize=(7, 3.5))
+    az_deg = np.rad2deg(np.angle(np.exp(1j * np.asarray(azimuths))))
+    sc = ax.scatter(az_deg, np.rad2deg(elevations), c=values, cmap="viridis", s=60)
+    fig.colorbar(sc, ax=ax, label=label)
+    #left (+90 deg) drawn on the left, as seen when facing the front
+    ax.set_xlim(180, -180)
+    ax.set_ylim(-90, 90)
+    ax.set_xlabel("Azimuth (deg)")
+    ax.set_ylabel("Elevation (deg)")
+    ax.grid(alpha=0.3)
+    plt.tight_layout()
+    plt.show()
+
+
+def plot_band_correlation(
+    mean_abs_r: NDArray, bands: NDArray, floor: NDArray | None = None,
+) -> None:
+    """Mean off-diagonal |r| per band, optionally against an estimation floor."""
+    fig, ax = plt.subplots(figsize=(7, 4))
+    x = np.arange(len(bands))
+    ax.plot(x, mean_abs_r, color="black", marker="o", label="measured")
+    if floor is not None:
+        ax.plot(x, floor, "r--", label="noise floor")
+    ax.set_xticks(x)
+    ax.set_xticklabels([f"{f:g}" for f in bands])
+    ax.set_xlabel("Frequency (Hz)")
+    ax.set_ylabel("mean |r|")
+    ax.set_ylim(bottom=0)
+    ax.legend()
+    ax.grid(alpha=0.3)
+    plt.tight_layout()
+    plt.show()
