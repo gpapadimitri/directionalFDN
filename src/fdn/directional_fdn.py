@@ -61,7 +61,9 @@ from __future__ import annotations
 import numpy as np
 import pyFDN
 from numpy.typing import NDArray
+from pyFDN.eq import gain_to_geq
 from pyFDN.td import SOSBank
+from scipy.signal import sosfilt
 
 from ..utils import db2lin
 from . import spatial
@@ -251,6 +253,8 @@ class DirectionalFDN:
         self._encoding_matrix: NDArray | None = None  # E (Eq. 13)
         self._early_reflections: EarlyReflectionModule | None = None
         self._input_distribution: NDArray | None = None  # b_i, Sec. 3
+        self._er_injected = True
+        self._p0_sos: NDArray | None = None
 
         # Grid directions
         self.grid_azimuths: NDArray | None = None
@@ -446,17 +450,66 @@ class DirectionalFDN:
         self._init_ambisonics_encoding()
 
     def set_early_reflections(
-        self, reflections: list[Reflection]
+        self, reflections: list[Reflection], *, injected: bool = True,
     ) -> None:
-        """Configure the early reflection module (Eqs. 3–5).
+        """Configure the early reflection module (Eqs. 3-5).
 
         Must be called after :meth:`setup` so that the grid is available.
+
+        Parameters
+        ----------
+        reflections : list[Reflection]
+        injected : bool
+            ``True`` (default): join group lambda after its delay and
+            recirculate, ICASSP 2020 Eq. 12. ``False``: add them to the grid
+            alongside the network, Alary and Valimaki (I3DA 2021, Sec. III B),
+            leaving group lambda's input in place. Required for
+            :meth:`set_initial_power`, which would otherwise filter them.
         """
         if self.grid_azimuths is None:
             raise RuntimeError("Call setup() before set_early_reflections().")
         self._early_reflections = EarlyReflectionModule(
             reflections, self.output_sh_order,
         )
+        self._er_injected = bool(injected)
+
+    def set_initial_power(self, p0_db: NDArray | float | None) -> None:
+        """Shape the network's initial power per grid direction and band.
+
+        Power gain in dB relative to the network's natural, flat initial power
+        (Gallien et al., DAFx26, Sec. 3.2.1 and 3.2.3). Applied to the network
+        output on the grid only: the direct sound and parallel early
+        reflections are not filtered, and the decay is unchanged.
+
+        Parameters
+        ----------
+        p0_db : float, NDArray or None
+            Scalar, ``(10,)``, ``(Q,)`` or ``(Q, 10)`` on
+            :func:`~src.fdn.fdn_components.geq_band_frequencies`. ``None``
+            removes the shaping.
+        """
+        if self.grid_azimuths is None:
+            raise RuntimeError("Call setup() before set_initial_power().")
+        if p0_db is None:
+            self._p0_sos = None
+            return
+        v = np.asarray(p0_db, dtype=float)
+        Q = self.Q
+        if v.ndim == 0:
+            gains = np.full((GEQ_NUM_BANDS, Q), float(v))
+        elif v.shape == (GEQ_NUM_BANDS,):
+            gains = np.tile(v[:, np.newaxis], (1, Q))
+        elif v.shape == (Q,):
+            gains = np.tile(v[np.newaxis, :], (GEQ_NUM_BANDS, 1))
+        elif v.shape == (Q, GEQ_NUM_BANDS):
+            gains = v.T
+        else:
+            raise ValueError(
+                f"p0_db must be scalar, ({GEQ_NUM_BANDS},), (Q={Q},) or "
+                f"(Q={Q}, {GEQ_NUM_BANDS}), got shape {v.shape}."
+            )
+        #|H|^2 = P, so the magnitude target in dB is the power gain in dB
+        self._p0_sos = np.asarray(gain_to_geq(gains, self.sample_rate))
 
     # ==================================================================
     # Output encoding (Eq. 13)
@@ -586,7 +639,7 @@ class DirectionalFDN:
         else:
             scale = np.sqrt(N * float(np.sum(weights**2)))
             b = np.tile(weights / scale, N).reshape(N, Q)
-        if self._early_reflections is not None:
+        if self._early_reflections is not None and self._er_injected:
             b = b.copy()
             b[self._lambda_group] = 0.0
         return b.reshape(N * Q, 1)
@@ -730,6 +783,18 @@ class DirectionalFDN:
         self._check_ready()
         if input_data.shape[0] != 1:
             raise ValueError("Input must be mono (1 channel).")
+        parallel_er = self._early_reflections is not None and not self._er_injected
+        injected_er = self._early_reflections is not None and self._er_injected
+        if self._p0_sos is not None and injected_er:
+            raise ValueError(
+                "Initial-power shaping would also filter the injected early "
+                "reflections; call set_early_reflections(..., injected=False)."
+            )
+        if self._p0_sos is not None or parallel_er:
+            return self._process_parallel(
+                input_data, source_azimuth, source_elevation,
+                direct_gain, er_gain, reverb_gain, grid_output,
+            )
 
         Q = self.Q
         ir_len = input_data.shape[-1]
@@ -766,6 +831,47 @@ class DirectionalFDN:
         )
         x = np.asarray(input_data, dtype=float)
         return graph.process_signal(x.T).T
+
+    def _process_parallel(
+        self,
+        input_data: NDArray,
+        source_azimuth: float,
+        source_elevation: float,
+        direct_gain: float,
+        er_gain: float,
+        reverb_gain: float,
+        grid_output: bool,
+    ) -> NDArray:
+        """Network on the grid, P0 shaping, then direct sound and reflections.
+
+        Alary and Valimaki (I3DA 2021, Sec. III B): the early part runs beside
+        the recursion. The network is rendered with no direct term so that the
+        per-direction filters touch the late field alone.
+        """
+        Q = self.Q
+        x = np.asarray(input_data, dtype=float)
+        b = self._build_input_gains() * float(reverb_gain)
+        c = self._build_output_gains()
+        A = self._kronecker_matrix
+        if self.absorption_gains is not None:
+            A = A * self.absorption_gains
+            c = c * self.absorption_gains
+        graph = pyFDN.dss_to_td(
+            self.delay_length_samps, A, b, c, np.zeros((Q, 1)),
+            post_delay=self.absorption_sos,
+        )
+        grid = graph.process_signal(x.T).T
+        if self._p0_sos is not None:
+            grid = np.stack([
+                sosfilt(np.ascontiguousarray(self._p0_sos[:, :, q]), grid[q])
+                for q in range(Q)
+            ])
+        grid = grid + (
+            self._build_direct_gain(source_azimuth, source_elevation) * float(direct_gain)
+        ) @ x
+        if self._early_reflections is not None:
+            grid = grid + self._build_er_grid_signal(x, x.shape[-1], er_gain)
+        return grid if grid_output else self._encoding_matrix @ grid
 
     # ==================================================================
     # Early reflections buffer
