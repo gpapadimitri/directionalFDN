@@ -5,7 +5,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from src.analysis import decay_fit
+from src.analysis import band_energy, decay_fit
 from src.fdn.directional_fdn import DirectionalFDN
 from src.fdn.fdn_components import geq_band_frequencies
 from src.fdn.room import Reflection
@@ -113,3 +113,54 @@ def test_set_initial_power_shapes():
         pw.set_initial_power(np.zeros(7))
     with pytest.raises(RuntimeError, match="setup"):
         DirectionalFDN(FS, 4, sh_order=2, seed=0).set_initial_power(0.0)
+
+
+def _late_w(pw, start_s=0.08, length_s=3.0):
+    w = pw.render(0.0, 0.0, length_s, direct_gain=0.0, er_gain=0.0)[0]
+    return band_energy(w, FS, BANDS, start_s)[:, 0]
+
+
+@pytest.mark.parametrize(
+    ("gains", "tol"),
+    [
+        (np.array([8.0, 6, 2, 0, 0, -1, -2, -4]), 0.2),
+        #band-to-band jumps; probe after 3 passes: 0.26 dB
+        (np.array([3.0, -2, 0, 4, -1, 2, -3, 1]), 0.5),
+    ],
+)
+def test_matching_reaches_reference(gains, tol):
+    target = _late_w(_make()) * 10.0 ** (gains / 10.0)
+    pw = _make()
+    pw.match_late_level(target, BANDS, window_start_s=0.08, length_s=3.0)
+    err = 10.0 * np.log10(_late_w(pw) / target)
+    assert np.all(np.abs(err) < tol), err
+
+
+def test_rematching_does_not_stack():
+    target = _late_w(_make()) * 2.0
+    pw = _make()
+    first = pw.match_late_level(target, BANDS, window_start_s=0.08, length_s=3.0)
+    second = pw.match_late_level(target, BANDS, window_start_s=0.08, length_s=3.0)
+    assert np.allclose(first, second)
+
+
+def test_parallel_reflections_do_not_bias_matching():
+    target = _late_w(_make()) * 2.0
+    pw = _make()
+    pw.set_early_reflections(REFLECTIONS, injected=False)
+    corr = pw.match_late_level(target, BANDS, window_start_s=0.08, length_s=3.0)
+    assert np.allclose(corr, 10.0 * np.log10(2.0), atol=0.05)
+
+
+def test_matching_with_injected_reflections_raises():
+    pw = _make()
+    pw.set_early_reflections(REFLECTIONS)
+    with pytest.raises(ValueError, match="injected"):
+        pw.match_late_level(np.ones(8), BANDS, window_start_s=0.08, length_s=1.0)
+
+
+def test_matching_rejects_off_grid_bands():
+    with pytest.raises(ValueError, match="geq_band_frequencies"):
+        _make().match_late_level(
+            np.ones(3), np.array([100.0, 200.0, 400.0]), window_start_s=0.08, length_s=1.0
+        )

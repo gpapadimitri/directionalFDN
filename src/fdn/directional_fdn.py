@@ -511,6 +511,72 @@ class DirectionalFDN:
         #|H|^2 = P, so the magnitude target in dB is the power gain in dB
         self._p0_sos = np.asarray(gain_to_geq(gains, self.sample_rate))
 
+    def match_late_level(
+        self,
+        target_energy: NDArray,
+        bands: NDArray,
+        *,
+        window_start_s: float,
+        length_s: float,
+        iterations: int = 3,
+    ) -> NDArray:
+        """Match the late W-channel energy per octave band to a reference.
+
+        Synthetic counterpart of the hybrid-reverb transition filter of
+        Carpentier, Noisternig and Warusfel (DAFx 2014, Eq. 3): the reference
+        is the energy from *window_start_s* to the end of a *length_s* render
+        rather than the EDR at t_mix. The tail is rendered alone (no direct
+        sound, no reflections) *iterations* times, refining one isotropic
+        per-band correction applied through :meth:`set_initial_power`; any
+        shaping set before is replaced.
+
+        Parameters
+        ----------
+        target_energy : NDArray, shape (B,)
+            Reference late energy per band, in the network's level convention
+            (``direct_gain=1`` is a unit direct sound in W). Converting a
+            measured or simulated reference into it is the caller's job.
+        bands : NDArray, shape (B,)
+            Consecutive octave centres from
+            :func:`~src.fdn.fdn_components.geq_band_frequencies`.
+        window_start_s : float
+            Window start, relative to the render's first sample.
+        length_s : float
+            Render length; the same as the reference's.
+        iterations : int
+            Measure-and-correct passes (3 brings jagged targets within 0.3 dB).
+
+        Returns
+        -------
+        NDArray, shape (B,)
+            Applied correction in dB.
+        """
+        #local import: src.analysis imports src.fdn
+        from ..analysis import band_energy
+
+        if self._early_reflections is not None and self._er_injected:
+            raise ValueError(
+                "The injected early reflections recirculate with the tail; call "
+                "set_early_reflections(..., injected=False) before matching."
+            )
+        bands = np.asarray(bands, dtype=float)
+        command = geq_band_frequencies()
+        if not np.all(np.isin(bands, command)):
+            raise ValueError(
+                "bands must be consecutive octave centres from geq_band_frequencies()."
+            )
+        target = np.asarray(target_energy, dtype=float)
+        correction = np.zeros(bands.size)
+        for _ in range(iterations):
+            self.set_initial_power(
+                np.interp(np.log2(command), np.log2(bands), correction)
+            )
+            w = self.render(0.0, 0.0, length_s, direct_gain=0.0, er_gain=0.0)[0]
+            measured = band_energy(w, self.sample_rate, bands, window_start_s)[:, 0]
+            correction = correction - 10.0 * np.log10(measured / target)
+        self.set_initial_power(np.interp(np.log2(command), np.log2(bands), correction))
+        return correction
+
     # ==================================================================
     # Output encoding (Eq. 13)
     # ==================================================================
