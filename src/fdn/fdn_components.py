@@ -27,7 +27,8 @@ Absorption
 ----------
 Graphic-EQ absorption (Schlecht and Habets, DAFx 2017).
 :func:`pyFDN.decay_to_geq` already takes one T60 curve per delay line -- what
-the plane-wave DFDN needs, one per direction.  :func:`design_absorption_sos`
+:class:`~src.fdn.directional_fdn.DirectionalFDN` needs, one per direction.
+:func:`design_absorption_sos`
 adds the ``(N, 10)`` row-per-line orientation used throughout the package and
 refuses a target on any other frequency axis.
 
@@ -152,7 +153,7 @@ def generate_delay_lengths(
     Draws from ``pyFDN.sample_delay_lengths`` with pairwise-coprime snapping,
     which is the classic FDN choice for avoiding coinciding echoes.  Coprimality
     is only achievable while the requested range holds enough mutually coprime
-    integers; at high channel counts (e.g. ``PlaneWaveDFDN`` with N*Q >= 300 in a
+    integers; at high channel counts (e.g. ``DirectionalFDN`` with N*Q >= 300 in a
     20-60 ms range) the snapping pushes values far outside the range, so this
     falls back to :func:`generate_distinct_delay_lengths`, which guarantees
     distinctness within the range but not coprimality.

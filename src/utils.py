@@ -235,7 +235,7 @@ def energy_decay_deviation(directional_irs: NDArray) -> NDArray:
         One impulse response per direction, already decomposed.  Beamforming
         is the caller's, since the beam pattern sets how much of the true
         deviation survives the analysis (Alary et al. 2021, Sec. II A) --
-        pass :meth:`~src.fdn.planewave_dfdn.PlaneWaveDFDN.render`'s
+        pass :meth:`~src.fdn.directional_fdn.DirectionalFDN.render`'s
         ``grid_output`` to leave it out of the measurement entirely.
 
     Returns

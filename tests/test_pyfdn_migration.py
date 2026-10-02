@@ -170,13 +170,13 @@ class TestPlainFDNOnPyFDN:
         np.testing.assert_allclose(rt[1:6], target[1:6], rtol=0.10)
 
 
-class TestDirectionalFDNCorrectedLoop:
+class TestDFDN2019CorrectedLoop:
     FS = 48000.0
 
     def _make(self, **kwargs):
-        from src.fdn.directional_fdn import DirectionalFDN
+        from src.fdn.dfdn_2019 import DFDN2019
 
-        dfdn = DirectionalFDN(self.FS, 8, ambisonics_order=1, seed=42,
+        dfdn = DFDN2019(self.FS, 8, ambisonics_order=1, seed=42,
                               **kwargs)
         dfdn.setup(delay_range_ms=(20.0, 60.0), des_t60_ms=1500.0)
         return dfdn
@@ -239,13 +239,13 @@ class TestDirectionalFDNCorrectedLoop:
         assert rir.shape[1] == int(0.501 * self.FS)
 
 
-class TestPlaneWaveDFDNCorrectedLoop:
+class TestDirectionalFDNCorrectedLoop:
     FS = 48000.0
 
     def _make(self, **setup_kwargs):
-        from src.fdn.planewave_dfdn import PlaneWaveDFDN
+        from src.fdn.directional_fdn import DirectionalFDN
 
-        pw = PlaneWaveDFDN(self.FS, 8, sh_order=1, seed=42)
+        pw = DirectionalFDN(self.FS, 8, sh_order=1, seed=42)
         kwargs = dict(delay_range_ms=(20.0, 60.0), t60_per_direction_ms=1500.0)
         kwargs.update(setup_kwargs)
         pw.setup(**kwargs)
@@ -475,11 +475,11 @@ class TestAirAbsorption:
 
     def test_enabling_air_shortens_the_decay(self):
         """The point of the change: the flag must now affect the sound."""
-        from src.fdn.planewave_dfdn import PlaneWaveDFDN
+        from src.fdn.directional_fdn import DirectionalFDN
 
         rt = {}
         for air in (False, True):
-            pw = PlaneWaveDFDN(self.FS, 8, sh_order=1, seed=42)
+            pw = DirectionalFDN(self.FS, 8, sh_order=1, seed=42)
             pw.setup(
                 delay_range_ms=(20.0, 60.0),
                 t60_per_direction_ms=self.T60 * 1e3,
@@ -496,9 +496,9 @@ class TestAirAbsorption:
         assert rt[True][low] == pytest.approx(rt[False][low], rel=0.05)
 
     def test_attributes_exposed_on_the_class(self):
-        from src.fdn.planewave_dfdn import PlaneWaveDFDN
+        from src.fdn.directional_fdn import DirectionalFDN
 
-        pw = PlaneWaveDFDN(self.FS, 8, sh_order=1, seed=42)
+        pw = DirectionalFDN(self.FS, 8, sh_order=1, seed=42)
         pw.setup(
             delay_range_ms=(20.0, 60.0),
             t60_per_direction_ms=self.T60 * 1e3,
@@ -612,9 +612,9 @@ class TestDelayLengthSpread:
     FS = 48000.0
 
     def _make(self, sh_order=3, groups=8):
-        from src.fdn.planewave_dfdn import PlaneWaveDFDN
+        from src.fdn.directional_fdn import DirectionalFDN
 
-        pw = PlaneWaveDFDN(self.FS, groups, sh_order=sh_order, seed=42)
+        pw = DirectionalFDN(self.FS, groups, sh_order=sh_order, seed=42)
         pw.setup(delay_range_ms=(20.0, 60.0), t60_per_direction_ms=1500.0)
         return pw
 
@@ -669,39 +669,39 @@ class TestLosslessnessChecks:
 
     FS = 48000.0
 
-    def test_planewave_kronecker_is_lossless(self):
-        import pyFDN
-
-        from src.fdn.planewave_dfdn import PlaneWaveDFDN
-
-        pw = PlaneWaveDFDN(self.FS, 4, sh_order=1, seed=42)
-        pw.setup(delay_range_ms=(20.0, 60.0), t60_per_direction_ms=1500.0)
-        assert pyFDN.is_unilossless(pw._kronecker_matrix)
-
-    def test_directional_kronecker_is_lossless(self):
+    def test_directional_fdn_kronecker_is_lossless(self):
         import pyFDN
 
         from src.fdn.directional_fdn import DirectionalFDN
 
-        dfdn = DirectionalFDN(self.FS, 4, ambisonics_order=1, seed=42)
-        dfdn.setup(delay_range_ms=(20.0, 60.0), des_t60_ms=1500.0)
-        assert pyFDN.is_unilossless(dfdn._kronecker_matrix)
-
-    def test_planewave_kronecker_matrix_stays_lossless(self):
-        """A kron I_Q is lossless whenever A is (ICASSP 2020, Sec. 3)."""
-        import pyFDN
-
-        from src.fdn.planewave_dfdn import PlaneWaveDFDN
-
-        pw = PlaneWaveDFDN(self.FS, 4, sh_order=1, seed=42)
+        pw = DirectionalFDN(self.FS, 4, sh_order=1, seed=42)
         pw.setup(delay_range_ms=(20.0, 60.0), t60_per_direction_ms=1500.0)
         assert pyFDN.is_unilossless(pw._kronecker_matrix)
 
-    def test_planewave_feedback_never_couples_directions(self):
-        """Eq. of Sec. 3: recirculation between different channels is zero."""
-        from src.fdn.planewave_dfdn import PlaneWaveDFDN
+    def test_dfdn_2019_kronecker_is_lossless(self):
+        import pyFDN
 
-        pw = PlaneWaveDFDN(self.FS, 4, sh_order=1, seed=42)
+        from src.fdn.dfdn_2019 import DFDN2019
+
+        dfdn = DFDN2019(self.FS, 4, ambisonics_order=1, seed=42)
+        dfdn.setup(delay_range_ms=(20.0, 60.0), des_t60_ms=1500.0)
+        assert pyFDN.is_unilossless(dfdn._kronecker_matrix)
+
+    def test_directional_fdn_kronecker_matrix_stays_lossless(self):
+        """A kron I_Q is lossless whenever A is (ICASSP 2020, Sec. 3)."""
+        import pyFDN
+
+        from src.fdn.directional_fdn import DirectionalFDN
+
+        pw = DirectionalFDN(self.FS, 4, sh_order=1, seed=42)
+        pw.setup(delay_range_ms=(20.0, 60.0), t60_per_direction_ms=1500.0)
+        assert pyFDN.is_unilossless(pw._kronecker_matrix)
+
+    def test_directional_fdn_feedback_never_couples_directions(self):
+        """Eq. of Sec. 3: recirculation between different channels is zero."""
+        from src.fdn.directional_fdn import DirectionalFDN
+
+        pw = DirectionalFDN(self.FS, 4, sh_order=1, seed=42)
         pw.setup(delay_range_ms=(20.0, 60.0), t60_per_direction_ms=1500.0)
         Q = pw.Q
         for i in range(pw.num_delay_line_groups):
@@ -885,9 +885,9 @@ class TestHigherOrderReflections:
 
     def test_band_gains_render_as_a_filtered_arrival(self):
         """With band gains a reflection is a short impulse response, not a spike."""
-        from src.fdn.planewave_dfdn import PlaneWaveDFDN
+        from src.fdn.directional_fdn import DirectionalFDN
 
-        pw = PlaneWaveDFDN(self.FS, 4, sh_order=1, seed=42)
+        pw = DirectionalFDN(self.FS, 4, sh_order=1, seed=42)
         pw.setup(delay_range_ms=(20.0, 60.0), t60_per_direction_ms=1000.0)
         pw.set_early_reflections(
             self._refl(order=1, freqs=self.FREQS, t60_per_band_s=self.T60)
@@ -900,11 +900,11 @@ class TestHigherOrderReflections:
         assert np.count_nonzero(np.abs(window) > 1e-6) > 1
 
     def test_higher_order_fills_the_early_window(self):
-        from src.fdn.planewave_dfdn import PlaneWaveDFDN
+        from src.fdn.directional_fdn import DirectionalFDN
 
         energy = {}
         for order in (1, 3):
-            pw = PlaneWaveDFDN(self.FS, 4, sh_order=1, seed=42)
+            pw = DirectionalFDN(self.FS, 4, sh_order=1, seed=42)
             pw.setup(delay_range_ms=(20.0, 60.0), t60_per_direction_ms=1000.0)
             pw.set_early_reflections(self._refl(order=order))
             w = pw.render(0.0, 0.0, length_seconds=0.5,
@@ -974,7 +974,7 @@ class TestVBAP:
             vbap_gains(np.array([0.0, 1.0]), np.array([0.0, 0.0]), 0.0, 0.0)
 
 
-class TestDirectionalFDNCarriesNoExtraKnobs:
+class TestDFDN2019CarriesNoExtraKnobs:
     """Only what JAES 2019 describes: A kron I_Q, the DWM, and Eq. 17 input.
 
     ``scattering_amount`` blended the per-group recirculation toward a random
@@ -986,18 +986,18 @@ class TestDirectionalFDNCarriesNoExtraKnobs:
     FS = 48000.0
 
     def _dfdn(self):
-        from src.fdn.directional_fdn import DirectionalFDN
+        from src.fdn.dfdn_2019 import DFDN2019
 
-        dfdn = DirectionalFDN(self.FS, 4, ambisonics_order=1,
+        dfdn = DFDN2019(self.FS, 4, ambisonics_order=1,
                               seed=42)
         dfdn.setup(delay_range_ms=(20.0, 60.0), des_t60_ms=1500.0)
         return dfdn
 
     def test_constructor_takes_no_scattering_amount(self):
-        from src.fdn.directional_fdn import DirectionalFDN
+        from src.fdn.dfdn_2019 import DFDN2019
 
         with pytest.raises(TypeError, match="scattering_amount"):
-            DirectionalFDN(self.FS, 4, ambisonics_order=1,
+            DFDN2019(self.FS, 4, ambisonics_order=1,
                            scattering_amount=0.5)
 
     def test_render_takes_no_directional_input_flag(self):
@@ -1140,9 +1140,9 @@ class TestInputDistribution:
     FS = 48000.0
 
     def _make(self):
-        from src.fdn.planewave_dfdn import PlaneWaveDFDN
+        from src.fdn.directional_fdn import DirectionalFDN
 
-        pw = PlaneWaveDFDN(self.FS, 4, sh_order=2, output_sh_order=2,
+        pw = DirectionalFDN(self.FS, 4, sh_order=2, output_sh_order=2,
                            seed=42)
         pw.setup(delay_range_ms=(20.0, 60.0), t60_per_direction_ms=1200.0)
         return pw
@@ -1222,9 +1222,9 @@ class TestLambdaGroupInput:
     FS = 48000.0
 
     def _make(self, lambda_group=0):
-        from src.fdn.planewave_dfdn import PlaneWaveDFDN
+        from src.fdn.directional_fdn import DirectionalFDN
 
-        pw = PlaneWaveDFDN(self.FS, 4, sh_order=1, output_sh_order=1,
+        pw = DirectionalFDN(self.FS, 4, sh_order=1, output_sh_order=1,
                            seed=42)
         pw.setup(delay_range_ms=(20.0, 60.0), t60_per_direction_ms=1200.0,
                  lambda_group=lambda_group)
@@ -1292,9 +1292,9 @@ class TestPaperFaithfulEncoding:
     T60 = np.array([0.9, 1.0, 1.1, 1.0, 0.8, 0.7, 0.6])
 
     def _make(self, sh_order=2, **kw):
-        from src.fdn.planewave_dfdn import PlaneWaveDFDN
+        from src.fdn.directional_fdn import DirectionalFDN
 
-        pw = PlaneWaveDFDN(self.FS, 8, sh_order=sh_order, output_sh_order=1,
+        pw = DirectionalFDN(self.FS, 8, sh_order=sh_order, output_sh_order=1,
                            seed=42, **kw)
         pw.setup(delay_range_ms=(20.0, 60.0), t60_per_direction_ms=1000.0)
         return pw
@@ -1338,7 +1338,7 @@ class TestPaperFaithfulEncoding:
 
     def test_drr_no_longer_depends_on_grid_size(self):
         """The leak this fixes: sh_order changed DRR by 7.3 dB."""
-        from src.fdn.planewave_dfdn import PlaneWaveDFDN
+        from src.fdn.directional_fdn import DirectionalFDN
         from src.fdn.room import shoebox_reflections
 
         room, src, rec = (10.0, 8.0, 4.0), (3.0, 7.0, 1.5), (8.0, 2.0, 1.5)
@@ -1347,7 +1347,7 @@ class TestPaperFaithfulEncoding:
                                    sample_rate=self.FS, t60_broadband_s=0.825)
         drrs = []
         for sh in (1, 2, 3):
-            pw = PlaneWaveDFDN(self.FS, 8, sh_order=sh, output_sh_order=1,
+            pw = DirectionalFDN(self.FS, 8, sh_order=sh, output_sh_order=1,
                                seed=42)
             pw.setup(delay_range_ms=(20.0, 60.0), t60_per_direction_ms=1000.0)
             pw.set_early_reflections(refl)
@@ -1361,10 +1361,10 @@ class TestPaperFaithfulEncoding:
 
         A reflection alone must therefore come out darker than it went in.
         """
-        from src.fdn.planewave_dfdn import PlaneWaveDFDN
+        from src.fdn.directional_fdn import DirectionalFDN
         from src.fdn.room import Reflection
 
-        pw = PlaneWaveDFDN(self.FS, 8, sh_order=2, output_sh_order=1,
+        pw = DirectionalFDN(self.FS, 8, sh_order=2, output_sh_order=1,
                            seed=42)
         # A frequency-varying target on the GEQ grid, so G_lambda actually
         # colours: a flat one leaves the reflection a bare impulse.
@@ -1379,10 +1379,10 @@ class TestPaperFaithfulEncoding:
         assert np.count_nonzero(np.abs(w[400:700]) > 1e-9) > 1   # and is filtered
 
     def test_reflections_still_excite_the_late_field(self):
-        from src.fdn.planewave_dfdn import PlaneWaveDFDN
+        from src.fdn.directional_fdn import DirectionalFDN
         from src.fdn.room import Reflection
 
-        pw = PlaneWaveDFDN(self.FS, 8, sh_order=2, output_sh_order=1,
+        pw = DirectionalFDN(self.FS, 8, sh_order=2, output_sh_order=1,
                            seed=42)
         pw.setup(delay_range_ms=(20.0, 60.0), t60_per_direction_ms=1000.0)
         pw.set_early_reflections(
@@ -1393,10 +1393,10 @@ class TestPaperFaithfulEncoding:
         assert np.sum(w[5000:] ** 2) > 1e-10
 
 
-class TestDirectionalFDNAgainstJAES2019:
+class TestDFDN2019AgainstJAES2019:
     """Alary, Politis, Schlecht and Valimaki, JAES 67(10), 2019.
 
-    Grounds DirectionalFDN in the paper it implements.  Verified as already
+    Grounds DFDN2019 in the paper it implements.  Verified as already
     correct and left alone: Eq. 20 (A kron I_Q), Eq. 21 (block-diagonal T),
     Eq. 16 (base absorption from T60_max), Eqs. 24-26 (directional gain), and
     the ordering of Eq. 23 -- the paper applies T before g, which commutes
@@ -1411,12 +1411,12 @@ class TestDirectionalFDNAgainstJAES2019:
         A 1/N factor made the direct sound drop 6 dB per doubling of the
         delay-line group count.
         """
-        from src.fdn.directional_fdn import DirectionalFDN
+        from src.fdn.dfdn_2019 import DFDN2019
         from src.fdn.spatial import encode_directions
 
         expected = encode_directions(0.0, 0.0, 1)[0]
         for groups in (4, 8, 16):
-            dfdn = DirectionalFDN(self.FS, groups, ambisonics_order=1,
+            dfdn = DFDN2019(self.FS, groups, ambisonics_order=1,
                                   seed=0)
             dfdn.setup(delay_range_ms=(20.0, 60.0), des_t60_ms=1000.0)
             rir = dfdn.render(0.0, 0.0, length_seconds=0.2)
@@ -1485,7 +1485,7 @@ class TestDirectionalFDNAgainstJAES2019:
         import pyFDN
 
         from src.fdn import spatial
-        from src.fdn.directional_fdn import DirectionalFDN
+        from src.fdn.dfdn_2019 import DFDN2019
 
         order = 2
         # Sec 3.1 samples T60 "using a uniform set of points on a sphere, such
@@ -1495,7 +1495,7 @@ class TestDirectionalFDNAgainstJAES2019:
         # sharpens it, pushing L' up with it.
         az, el = spatial.quadrature_grid(10)
         t60 = np.where(np.cos(az) > 0, 2.0, 0.6) * 1e3
-        dfdn = DirectionalFDN(self.FS, 8, ambisonics_order=order,
+        dfdn = DFDN2019(self.FS, 8, ambisonics_order=order,
                               seed=42)
         dfdn.setup(delay_range_ms=(20.0, 60.0), des_t60_ms=1500.0)
         dfdn.set_directional_decay(t60, az, el)
@@ -1579,9 +1579,9 @@ class TestGridOutput:
     FS = 48000.0
 
     def _dfdn(self):
-        from src.fdn.planewave_dfdn import PlaneWaveDFDN
+        from src.fdn.directional_fdn import DirectionalFDN
 
-        pw = PlaneWaveDFDN(self.FS, 4, sh_order=1, output_sh_order=1,
+        pw = DirectionalFDN(self.FS, 4, sh_order=1, output_sh_order=1,
                            seed=42)
         pw.setup(delay_range_ms=(20.0, 60.0), t60_per_direction_ms=1000.0)
         return pw
@@ -1603,9 +1603,9 @@ class TestGridOutput:
         """Without the encoder, each grid channel keeps its own T60."""
         import pyFDN
 
-        from src.fdn.planewave_dfdn import PlaneWaveDFDN
+        from src.fdn.directional_fdn import DirectionalFDN
 
-        pw = PlaneWaveDFDN(self.FS, 8, sh_order=1, output_sh_order=1,
+        pw = DirectionalFDN(self.FS, 8, sh_order=1, output_sh_order=1,
                            seed=42)
         pw._init_grid()
         scale = 1.0 - 0.5 * np.clip(np.sin(pw.grid_elevations), 0.0, None)

@@ -74,7 +74,8 @@ def quadrature_grid(order: int) -> tuple[NDArray, NDArray]:
     ``spharpy``'s *n_max* is already an SH order, doubled to a degree inside
     the library, so it takes *order* rather than ``2 * order``.  Passing the
     doubled value asks for degree ``4L``: at order 3 that is 86 points where
-    26 suffice, and the delay-line count of a plane-wave DFDN scales with it.
+    26 suffice, and the delay-line count of a
+    :class:`~src.fdn.directional_fdn.DirectionalFDN` scales with it.
     The orthogonality error is identical either way, and slightly worse on
     the larger grid, there being more points to sum over.
 
@@ -118,7 +119,7 @@ def vbap_gains(
 
     Alary and Politis (ICASSP 2020) use this for the direct sound (Eq. 3) and
     for every early reflection (Eq. 4), so that those signals live on the same
-    plane-wave grid as the recirculating ones and reach the output through the
+    grid as the recirculating ones and reach the output through the
     single encoding matrix ``E`` of Eq. 13.
 
     Gains are normalised to **sum** to one rather than to unit norm.  The

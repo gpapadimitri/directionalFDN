@@ -408,7 +408,7 @@ def shoebox_reflections(
     """Image-source early reflections for a shoebox room.
 
     Returns :class:`Reflection` objects sorted by arrival time, ready for
-    :meth:`PlaneWaveDFDN.set_early_reflections`.  A shoebox has ``4n^2 + 2``
+    :meth:`DirectionalFDN.set_early_reflections`.  A shoebox has ``4n^2 + 2``
     images at reflection order *n*, so the returned count is 6, 24, 62 or 128
     for ``order`` 1 to 4.
 

@@ -6,6 +6,7 @@ import numpy as np
 import pyFDN
 import pytest
 
+from src.fdn.dfdn_2019 import DFDN2019
 from src.fdn.directional_fdn import DirectionalFDN
 from src.fdn.fdn_components import (
     FeedbackMatrix,
@@ -13,7 +14,6 @@ from src.fdn.fdn_components import (
     generate_distinct_delay_lengths,
     geq_band_frequencies,
 )
-from src.fdn.planewave_dfdn import PlaneWaveDFDN
 from src.fdn.room import Reflection
 from src.fdn.spatial import (
     encode_directions,
@@ -126,9 +126,9 @@ class TestFeedbackMatrix:
 # Directional FDN
 # ======================================================================
 
-class TestDirectionalFDN:
+class TestDFDN2019:
     def _make_dfdn(self, seed=42):
-        dfdn = DirectionalFDN(
+        dfdn = DFDN2019(
             sample_rate=48000,
             num_delay_line_groups=4,
             ambisonics_order=1,
@@ -260,8 +260,8 @@ class TestDirectionalWeighting:
 # Plane-Wave DFDN (ICASSP 2020)
 # ======================================================================
 
-class TestPlaneWaveDFDN:
-    """Tests for the ICASSP 2020 Plane-Wave Domain DFDN."""
+class TestDirectionalFDN:
+    """Tests for the ICASSP 2020 grid-based DirectionalFDN."""
 
     @staticmethod
     def _make(
@@ -269,8 +269,8 @@ class TestPlaneWaveDFDN:
         L: int = 1,
         t60: float = 800.0,
         seed: int = 42,
-    ) -> PlaneWaveDFDN:
-        pw = PlaneWaveDFDN(
+    ) -> DirectionalFDN:
+        pw = DirectionalFDN(
             sample_rate=48000,
             num_delay_line_groups=N,
             sh_order=L,
@@ -330,7 +330,7 @@ class TestPlaneWaveDFDN:
 
     def test_directional_t60(self):
         """Direction-dependent T60 should produce anisotropic output."""
-        pw = PlaneWaveDFDN(
+        pw = DirectionalFDN(
             sample_rate=48000,
             num_delay_line_groups=4,
             sh_order=1,
@@ -353,7 +353,7 @@ class TestPlaneWaveDFDN:
 
     def test_freq_dependent_isotropic(self):
         """Frequency-dependent but isotropic T60 (n_bands,) — most common case."""
-        pw = PlaneWaveDFDN(
+        pw = DirectionalFDN(
             sample_rate=48000,
             num_delay_line_groups=4,
             sh_order=1,
@@ -372,7 +372,7 @@ class TestPlaneWaveDFDN:
 
     def test_freq_dependent_t60(self):
         """Frequency-dependent + direction-dependent T60."""
-        pw = PlaneWaveDFDN(
+        pw = DirectionalFDN(
             sample_rate=48000,
             num_delay_line_groups=4,
             sh_order=1,
@@ -405,7 +405,7 @@ class TestEarlyReflections:
     def test_er_grid_signal_is_vbap_panned(self):
         """Eqs. 4-5: each reflection lands on the grid, at its own delay,
         panned toward its own direction."""
-        pw = PlaneWaveDFDN(
+        pw = DirectionalFDN(
             sample_rate=48000, num_delay_line_groups=4, sh_order=1,
             seed=42,
         )
@@ -448,7 +448,7 @@ class TestEarlyReflections:
 
     def test_er_injection(self):
         """Early reflections should appear at their expected delay times."""
-        pw = PlaneWaveDFDN(
+        pw = DirectionalFDN(
             sample_rate=48000,
             num_delay_line_groups=4,
             sh_order=1,
@@ -503,7 +503,7 @@ class TestAirAbsorptionAccounting:
         return out.mean(axis=0) * 1e3
 
     def _make(self, air, t60_ms=None):
-        pw = PlaneWaveDFDN(
+        pw = DirectionalFDN(
             sample_rate=48000,
             num_delay_line_groups=4,
             sh_order=1,
