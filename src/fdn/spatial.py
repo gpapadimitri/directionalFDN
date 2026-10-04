@@ -146,6 +146,10 @@ def vbap_gains(
         raise ValueError(
             f"VBAP needs at least 4 grid directions, got {grid.shape[0]}."
         )
+    if not (np.isfinite(azimuth) and np.isfinite(elevation)):
+        raise ValueError(
+            f"VBAP needs a finite direction, got azimuth={azimuth}, elevation={elevation}."
+        )
     target = _unit_vectors(np.array([azimuth]), np.array([elevation]))[0]
 
     # The grid lies on the unit sphere, so its convex hull triangulates it.

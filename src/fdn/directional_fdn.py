@@ -58,6 +58,8 @@ The frequency axis is the graphic EQ's own design grid; build targets against
 
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
 import pyFDN
 from numpy.typing import NDArray
@@ -379,6 +381,13 @@ class DirectionalFDN:
 
         # 3. Per-direction absorption
         t60 = np.asarray(t60_per_direction_ms, dtype=float)
+        if not np.all(np.isfinite(t60) & (t60 > 0.0)):
+            raise ValueError(
+                "t60_per_direction_ms must be finite and positive; a negative T60 "
+                "designs a gain above one and the network diverges."
+            )
+        #the previous setup's shaping was fitted to its tail, not this one's
+        self._p0_sos = None
         freqs = geq_band_frequencies()
 
         # A (Q,) target is broadband per direction and a (GEQ_NUM_BANDS,) one
@@ -428,8 +437,6 @@ class DirectionalFDN:
             )
             self.absorption_sos = None
             if air_absorption:
-                import warnings
-
                 warnings.warn(
                     "air_absorption is ignored for a broadband T60: the "
                     "absorption coefficient is frequency-dependent, so the "
@@ -507,6 +514,8 @@ class DirectionalFDN:
             self._p0_sos = None
             return
         v = np.asarray(p0_db, dtype=float)
+        if not np.all(np.isfinite(v)):
+            raise ValueError("p0_db must be finite.")
         Q = self.Q
         if v.ndim == 0:
             gains = np.full((GEQ_NUM_BANDS, Q), float(v))
@@ -579,6 +588,11 @@ class DirectionalFDN:
                 "bands must be consecutive octave centres from geq_band_frequencies()."
             )
         target = np.asarray(target_energy, dtype=float)
+        if target.shape != bands.shape or not np.all(np.isfinite(target) & (target > 0.0)):
+            raise ValueError(
+                f"target_energy must be finite, positive and shape {bands.shape}, "
+                f"one value per band; got shape {target.shape}."
+            )
         correction = np.zeros(bands.size)
         for _ in range(iterations):
             self.set_initial_power(
@@ -586,8 +600,22 @@ class DirectionalFDN:
             )
             w = self.render(0.0, 0.0, length_s, direct_gain=0.0, er_gain=0.0)[0]
             measured = band_energy(w, self.sample_rate, bands, window_start_s)[:, 0]
+            if not np.all(measured > 0.0):
+                self._p0_sos = None
+                raise ValueError(
+                    "The tail has no energy in the window in some band: "
+                    f"window_start_s={window_start_s} against length_s={length_s}."
+                )
             correction = correction - 10.0 * np.log10(measured / target)
         self.set_initial_power(np.interp(np.log2(command), np.log2(bands), correction))
+        if np.max(np.abs(correction)) > 40.0:
+            warnings.warn(
+                f"match_late_level applied up to {np.max(np.abs(correction)):.0f} dB: "
+                "the target is probably in another level convention than this "
+                "network's (direct_gain=1 is a unit direct sound in W).",
+                RuntimeWarning,
+                stacklevel=2,
+            )
         return correction
 
     # ==================================================================
@@ -815,7 +843,7 @@ class DirectionalFDN:
         num_samples = int(length_seconds * self.sample_rate)
 
         impulse = np.zeros((1, num_samples))
-        impulse[0, 0] = 1.0
+        impulse[0, :1] = 1.0
 
         return self.process(
             impulse, source_azimuth, source_elevation,
@@ -862,6 +890,8 @@ class DirectionalFDN:
         self._check_ready()
         if input_data.shape[0] != 1:
             raise ValueError("Input must be mono (1 channel).")
+        if input_data.shape[-1] == 0:
+            return np.zeros((self.Q if grid_output else self.num_outputs, 0))
         parallel_er = self._early_reflections is not None and not self._er_injected
         injected_er = self._early_reflections is not None and self._er_injected
         if self._p0_sos is not None and injected_er:

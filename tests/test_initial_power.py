@@ -164,3 +164,49 @@ def test_matching_rejects_off_grid_bands():
         _make().match_late_level(
             np.ones(3), np.array([100.0, 200.0, 400.0]), window_start_s=0.08, length_s=1.0
         )
+
+
+def test_setup_resets_initial_power_shaping():
+    pw = _make()
+    pw.set_initial_power(6.0)
+    pw.setup(
+        delay_range_ms=(5.0, 25.0), t60_per_direction_ms=T60_CMD, feedback_type="hadamard"
+    )
+    assert np.allclose(pw.render(0.3, 0.1, 0.3), _make().render(0.3, 0.1, 0.3))
+
+
+@pytest.mark.parametrize("bad", [np.nan, np.inf])
+def test_set_initial_power_rejects_non_finite(bad):
+    with pytest.raises(ValueError, match="finite"):
+        _make().set_initial_power(bad)
+
+
+@pytest.mark.parametrize(
+    "target", [np.zeros(8), -np.ones(8), np.full(8, np.nan), np.ones(5)],
+    ids=["zero", "negative", "nan", "wrong-shape"],
+)
+def test_matching_rejects_unusable_targets(target):
+    with pytest.raises(ValueError, match="target_energy"):
+        _make().match_late_level(target, BANDS, window_start_s=0.08, length_s=1.0)
+
+
+def test_matching_rejects_a_window_past_the_render():
+    pw = _make()
+    with pytest.raises(ValueError, match="no energy"):
+        pw.match_late_level(np.full(8, 1e-4), BANDS, window_start_s=5.0, length_s=1.0)
+    assert pw._p0_sos is None
+
+
+def test_matching_warns_on_an_implausible_level_convention():
+    with pytest.warns(RuntimeWarning, match="level convention"):
+        _make().match_late_level(
+            np.full(8, 1e30), BANDS, window_start_s=0.08, length_s=1.0
+        )
+
+
+def test_matching_supports_a_single_band():
+    pw = _make()
+    target = _late_w(_make())[4:5] * 2.0
+    pw.match_late_level(target, BANDS[4:5], window_start_s=0.08, length_s=3.0)
+    err = 10.0 * np.log10(_late_w(pw)[4] / target[0])
+    assert abs(err) < 0.3

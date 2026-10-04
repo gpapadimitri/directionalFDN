@@ -569,3 +569,28 @@ class TestAirAbsorptionAccounting:
         assert realised_top < 5.0 * 0.5
         assert realised_top < ceiling
 
+
+@pytest.mark.parametrize(
+    "t60", [-800.0, np.full(10, -1200.0), np.full(10, np.nan), np.zeros(10), 0.0],
+    ids=["neg-scalar", "neg-bands", "nan", "zero-bands", "zero-scalar"],
+)
+def test_setup_rejects_a_non_positive_or_non_finite_t60(t60):
+    """A negative T60 designs a gain above one: 10 bands of -1200 ms grew 280 dB."""
+    pw = DirectionalFDN(48000, 4, sh_order=1, seed=1)
+    with pytest.raises(ValueError, match="finite and positive"):
+        pw.setup(delay_range_ms=(10, 30), t60_per_direction_ms=t60)
+
+
+def test_zero_length_render_is_empty_not_an_error():
+    pw = DirectionalFDN(48000, 4, sh_order=1, seed=1)
+    pw.setup(delay_range_ms=(10, 30), t60_per_direction_ms=800.0)
+    assert pw.render(0.0, 0.0, 0.0).shape == (4, 0)
+    assert pw.render(0.0, 0.0, 0.0, grid_output=True).shape == (pw.Q, 0)
+
+
+@pytest.mark.parametrize("az, el", [(np.nan, 0.0), (0.0, np.nan), (np.inf, 0.0)])
+def test_non_finite_source_direction_raises_a_clear_error(az, el):
+    pw = DirectionalFDN(48000, 4, sh_order=1, seed=1)
+    pw.setup(delay_range_ms=(10, 30), t60_per_direction_ms=800.0)
+    with pytest.raises(ValueError, match="finite direction"):
+        pw.render(az, el, 0.1)

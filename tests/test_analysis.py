@@ -11,6 +11,7 @@ from src.analysis import (
     band_energy,
     decay_fit,
     mean_offdiag_abs,
+    octave_bands,
     predicted_beam_decay,
     sh_to_beams,
 )
@@ -110,3 +111,26 @@ def test_predicted_beam_decay_sidelobe_pulls_toward_slow_direction():
     pred = predicted_beam_decay(np.array([[1.0, 0.3]]), t60, np.zeros_like(t60), FS, 4.0)
     #a -10 dB sidelobe on the slow direction owns most of the T30 window
     assert 0.9 < pred[0, 0] < 1.5
+
+
+def test_single_band_is_supported():
+    x = _decaying_noise(2, 1.0, 1.0, seed=8)
+    assert octave_bands(x, FS, np.array([1000.0])).shape == (1, 2, FS)
+    assert band_energy(x, FS, np.array([1000.0]), 0.01).shape == (1, 2)
+
+
+def test_silent_channel_gives_nan_not_an_exception():
+    x = np.vstack([np.zeros(FS * 2), _decaying_noise(1, 1.0, 2.0, seed=9)[0]])
+    t60, p0 = decay_fit(x, FS, BANDS, "T30")
+    assert np.all(np.isnan(t60[0])) and np.all(np.isnan(p0[0]))
+    assert np.all(np.isfinite(t60[1, 2:]))
+
+
+def test_predicted_beam_decay_rejects_a_non_positive_t60():
+    with pytest.raises(ValueError, match="t60_ms"):
+        predicted_beam_decay(np.eye(2), np.zeros((2, 1)), np.zeros((2, 1)), FS, 2.0)
+
+
+def test_sh_to_beams_rejects_a_channel_count_that_is_not_a_square():
+    with pytest.raises(ValueError, match=r"\(L\+1\)\^2"):
+        sh_to_beams(np.zeros((10, 100)), np.zeros(3), np.zeros(3))

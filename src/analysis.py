@@ -22,15 +22,19 @@ _DECAY_INTERVALS_DB = {"EDT": (-0.1, -10.1), "T20": (-5.0, -25.0), "T30": (-5.0,
 def octave_bands(x: NDArray, fs: float, bands: NDArray) -> NDArray:
     """Octave-band split along the last axis, band axis first: (B, C, n)."""
     bands = np.asarray(bands, dtype=float)
+    x = np.atleast_2d(x)
     y = pf.dsp.filter.fractional_octave_bands(
-        pf.Signal(np.atleast_2d(x), fs), 1, frequency_range=(bands[0], bands[-1])
+        pf.Signal(x, fs), 1, frequency_range=(bands[0], bands[-1])
     ).time
-    if y.shape[0] != bands.size:
+    shape = (bands.size, x.shape[0], x.shape[-1])
+    #pyfar drops the band axis for a single band, so compare sizes, not shapes
+    if y.size != int(np.prod(shape)):
         raise ValueError(
-            f"bands must be consecutive octave centres; pyfar gives {y.shape[0]} "
-            f"bands between {bands[0]:g} and {bands[-1]:g} Hz, not {bands.size}."
+            "bands must be consecutive octave centres; pyfar returns "
+            f"{y.size // (x.shape[0] * x.shape[-1])} bands between {bands[0]:g} and "
+            f"{bands[-1]:g} Hz, not {bands.size}."
         )
-    return y
+    return y.reshape(shape)
 
 
 def band_edc_db(x: NDArray, fs: float, bands: NDArray) -> NDArray:
@@ -86,8 +90,11 @@ def decay_fit(
     edc = schroeder_integration(pf.Signal(octave_bands(x, fs, bands), fs)).time
     n = edc.shape[-1]
     edc0 = edc[..., 0]
+    #a silent channel has no decay; give pyrato a dummy curve and mask it below
+    silent = ~(edc0 > 0.0)
     with np.errstate(divide="ignore", invalid="ignore"):
-        norm = edc / edc0[..., np.newaxis]
+        dummy = np.exp(-np.arange(n) / fs * 7.0)
+        norm = np.where(silent[..., np.newaxis], dummy, edc / edc0[..., np.newaxis])
         edc_db = 10.0 * np.log10(norm)
         i0 = np.argmin(np.abs(upper - edc_db), axis=-1)
         i1 = np.argmin(np.abs(lower - edc_db), axis=-1)
@@ -99,7 +106,7 @@ def decay_fit(
         p0 = 10.0 * np.log10(intercept * edc0 / (tau * fs * bandwidth))
     #a truncated tail bends the backward integral down and pyrato does not
     #check, so require at least as much signal after the window as in it
-    valid = (i1 - i0 >= 2) & (n - i1 >= i1 - i0) & (t > 0)
+    valid = (i1 - i0 >= 2) & (n - i1 >= i1 - i0) & (t > 0) & ~silent
     return np.where(valid, t, np.nan).T, np.where(valid, p0, np.nan).T
 
 
@@ -125,7 +132,11 @@ def sh_to_beams(sh: NDArray, azimuths: NDArray, elevations: NDArray) -> NDArray:
 
     Unit gain toward a unit plane wave's own direction.
     """
-    order = int(np.sqrt(sh.shape[0])) - 1
+    order = int(round(np.sqrt(sh.shape[0]))) - 1
+    if order < 0 or (order + 1) ** 2 != sh.shape[0]:
+        raise ValueError(
+            f"sh must have (L+1)^2 Ambisonic channels, got {sh.shape[0]}."
+        )
     y = spatial.encode_directions(azimuths, elevations, order).reshape(-1, (order + 1) ** 2)
     degree = np.floor(np.sqrt(np.arange((order + 1) ** 2))).astype(int)
     return (y * (2 * degree + 1) / (order + 1) ** 2) @ sh
@@ -169,6 +180,8 @@ def predicted_beam_decay(
     t = np.arange(int(length_s * fs)) / fs
     weights = np.asarray(beam_from_grid, dtype=float) ** 2
     t60_ms = np.asarray(t60_ms, dtype=float)
+    if not np.all(np.isfinite(t60_ms) & (t60_ms > 0.0)):
+        raise ValueError("t60_ms must be finite and positive.")
     out = np.empty((weights.shape[0], t60_ms.shape[1]))
     for k in range(t60_ms.shape[1]):
         tau = t60_ms[:, k] * 1e-3 / (6.0 * np.log(10.0))
