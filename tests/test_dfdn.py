@@ -559,12 +559,13 @@ class TestAirAbsorptionAccounting:
         model an unreachable target is not an error to report, it is simply
         pulled down toward what the medium allows.
         """
-        from src.fdn.room import air_absorption_t60
+        from src.fdn.air import Atmosphere
 
         t60 = self.t60_ms.copy()
         t60[-1] = 5000.0
         pw = self._make(True, t60_ms=t60)
-        ceiling = air_absorption_t60(self.freqs)[-1]
+        ceiling = Atmosphere().t60(self.freqs)[-1]
         realised_top = pw.realised_t60_s[:, -1].mean()
         assert realised_top < 5.0 * 0.5
         assert realised_top < ceiling
+

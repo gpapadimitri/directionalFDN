@@ -67,6 +67,7 @@ from scipy.signal import sosfilt
 
 from ..utils import db2lin
 from . import spatial
+from .air import AirBudget, Atmosphere
 from .fdn_components import (
     GEQ_NUM_BANDS,
     FeedbackMatrix,
@@ -75,7 +76,7 @@ from .fdn_components import (
     generate_delay_lengths,
     geq_band_frequencies,
 )
-from .room import Reflection, air_absorption_split, air_limited_t60
+from .room import Reflection
 
 # ---------------------------------------------------------------------------
 # Early Reflection Module (Eqs. 3–5)
@@ -210,10 +211,12 @@ class DirectionalFDN:
     realised_t60_s : NDArray or None
         The T60 actually designed for, shape ``(N*Q, n_bands)``.  Equals the
         requested target unless ``air_absorption`` shortened it.
-    air_attenuation_db, boundary_attenuation_db : NDArray or None
+    air_budget : AirBudget or None
         Per-round-trip attenuation in dB attributed to the medium and to the
-        boundary, shape ``(N*Q, n_bands)``.  Set only when ``air_absorption``
-        is enabled; they sum to the loss the realised target requires.
+        boundary, shape ``(N*Q, n_bands)``, which sum to the loss the realised
+        target requires.  Set only when ``air_absorption`` is enabled.
+        :attr:`air_attenuation_db` and :attr:`boundary_attenuation_db` read its
+        two shares.
     """
 
     def __init__(
@@ -245,8 +248,7 @@ class DirectionalFDN:
         self.delay_length_samps: NDArray | None = None
         self.absorption_gains: NDArray | None = None  # broadband, per line
         self.absorption_sos: NDArray | None = None
-        self.air_attenuation_db: NDArray | None = None
-        self.boundary_attenuation_db: NDArray | None = None
+        self.air_budget: AirBudget | None = None
         self.realised_t60_s: NDArray | None = None
         self._kronecker_matrix: NDArray | None = None
         self._base_feedback: FeedbackMatrix | None = None
@@ -259,6 +261,16 @@ class DirectionalFDN:
         # Grid directions
         self.grid_azimuths: NDArray | None = None
         self.grid_elevations: NDArray | None = None
+
+    @property
+    def air_attenuation_db(self) -> NDArray | None:
+        """Medium share of the round-trip attenuation, ``(N*Q, n_bands)``."""
+        return None if self.air_budget is None else self.air_budget.air_db
+
+    @property
+    def boundary_attenuation_db(self) -> NDArray | None:
+        """Boundary share of the round-trip attenuation, ``(N*Q, n_bands)``."""
+        return None if self.air_budget is None else self.air_budget.boundary_db
 
     # ==================================================================
     # Grid generation
@@ -297,7 +309,7 @@ class DirectionalFDN:
         t60_per_direction_ms: NDArray | float = 800.0,
         *,
         feedback_type: FeedbackMatrixType = FeedbackMatrixType.RANDOM,
-        air_absorption: bool = False,
+        air_absorption: bool | Atmosphere = False,
         lambda_group: int = 0,
         rng: np.random.Generator | None = None,
     ) -> None:
@@ -324,18 +336,19 @@ class DirectionalFDN:
             interpolated linearly in hertz between them and held beyond.
         feedback_type : FeedbackMatrixType
             Type of base N×N feedback matrix.
-        air_absorption : bool, optional
+        air_absorption : bool or Atmosphere, optional
             Treat *t60_per_direction_ms* as the **boundary-only** target and
-            add atmospheric absorption (ISO 9613-1) on top of it, so the
-            realised decay is ``1/T = 1/T_boundary + 1/T_air`` -- the ``4mV``
-            term of Sabine and Eyring.  The realised T60 is therefore shorter
-            than requested, appreciably so above a few kHz, and is recorded in
+            add atmospheric absorption (ISO 9613-1) on top of it: ``True`` for
+            the default :class:`~src.fdn.air.Atmosphere`, or an instance for
+            other conditions.  The realised decay is
+            ``1/T = 1/T_boundary + 1/T_air`` -- the ``4mV`` term of Sabine and
+            Eyring.  The realised T60 is therefore shorter than requested,
+            appreciably so above a few kHz, and is recorded in
             :attr:`realised_t60_s`.  The medium and boundary shares of each
-            round trip are exposed as :attr:`air_attenuation_db` and
-            :attr:`boundary_attenuation_db`.  Requires a frequency-dependent
-            T60; ignored with a warning for a broadband one, whose single
-            value cannot carry a frequency-dependent medium.  Default
-            ``False``.
+            round trip are exposed as :attr:`air_budget`.  Requires a
+            frequency-dependent T60; ignored with a warning for a broadband one,
+            whose single value cannot carry a frequency-dependent medium.
+            Default ``False``.
         lambda_group : int, optional
             Index of the delay-line group that receives the early-reflection
             re-injection ``s'(n)`` (Eq. 12).  Default ``0``.
@@ -405,8 +418,7 @@ class DirectionalFDN:
             )
         # Branch on the shape actually computed above: a (Q,) T60 is
         # broadband-per-channel and must take the scalar-gain path.
-        self.air_attenuation_db = None
-        self.boundary_attenuation_db = None
+        self.air_budget = None
         self.realised_t60_s = None
         if t60_expanded.ndim == 1:
             # Broadband: one scalar gain per channel, round trip = m exactly.
@@ -430,14 +442,15 @@ class DirectionalFDN:
         else:
             t60_2d = t60_expanded * 1e-3
             if air_absorption:
-                # The medium enters through the target, which is the only place
-                # an FDN has for it: every reference implementation designs
-                # absorption from reverberation time and delay lengths alone.
-                # Summing decay rates is the 4mV term of Sabine and Eyring.
-                self.air_attenuation_db, self.boundary_attenuation_db = (
-                    air_absorption_split(t60_2d, freqs, all_lengths, self.sample_rate)
+                atmosphere = (
+                    air_absorption
+                    if isinstance(air_absorption, Atmosphere)
+                    else Atmosphere()
                 )
-                t60_2d = air_limited_t60(t60_2d, freqs)
+                self.air_budget = atmosphere.budget(
+                    t60_2d, freqs, all_lengths, self.sample_rate
+                )
+                t60_2d = atmosphere.limit(t60_2d, freqs)
             self.realised_t60_s = np.broadcast_to(
                 t60_2d, (N * Q, GEQ_NUM_BANDS)
             ).copy()

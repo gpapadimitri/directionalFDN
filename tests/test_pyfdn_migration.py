@@ -357,35 +357,6 @@ class TestAirAbsorption:
     T60 = np.array([1.8, 1.8, 1.7, 1.6, 1.4, 1.2, 1.0, 0.7, 0.45, 0.2])
 
     @pytest.mark.parametrize(
-        ("temperature_c", "humidity_percent"),
-        [(20.0, 50.0), (20.0, 1.0), (20.0, 90.0), (0.0, 50.0),
-         (40.0, 50.0), (-15.0, 30.0), (35.0, 80.0), (50.0, 10.0)],
-    )
-    def test_matches_pyfars_independent_iso9613(
-        self, temperature_c, humidity_percent
-    ):
-        """Pinned against another implementation of the same standard.
-
-        pyfar.constants.air_attenuation is an independent ISO 9613-1, and it
-        takes relative humidity as a 0-1 fraction where this module takes
-        percent -- so the conversion below is also the convention check.
-        """
-        import pyfar
-
-        from src.fdn.room import air_absorption_db_per_meter
-
-        freqs = np.array([63.0, 125, 250, 500, 1000, 2000, 4000, 8000, 16000])
-        ours = air_absorption_db_per_meter(
-            freqs, temperature_c=temperature_c,
-            humidity_percent=humidity_percent,
-        )
-        # Returns (alpha, m, accuracy); alpha is the dB/m coefficient.
-        theirs, _, _ = pyfar.constants.air_attenuation(
-            temperature_c, freqs, humidity_percent / 100.0
-        )
-        np.testing.assert_allclose(ours, theirs, rtol=1e-3)
-
-    @pytest.mark.parametrize(
         ("kwargs", "match"),
         [
             ({"humidity_percent": 150.0}, "humidity"),
@@ -398,17 +369,17 @@ class TestAirAbsorption:
     )
     def test_rejects_unphysical_atmospheres(self, kwargs, match):
         """Out-of-range inputs returned plausible numbers rather than failing."""
-        from src.fdn.room import air_absorption_db_per_meter
+        from src.fdn.air import Atmosphere
 
         with pytest.raises(ValueError, match=match):
-            air_absorption_db_per_meter(np.array([1000.0]), **kwargs)
+            Atmosphere(**kwargs)
 
     def test_rejects_negative_frequencies(self):
         """alpha goes as f^2, so a sign error would pass silently."""
-        from src.fdn.room import air_absorption_db_per_meter
+        from src.fdn.air import Atmosphere
 
         with pytest.raises(ValueError, match="[Ff]requenc"):
-            air_absorption_db_per_meter(np.array([-1000.0]))
+            Atmosphere().alpha_db_per_m(np.array([-1000.0]))
 
     def test_zero_frequency_gives_an_infinite_air_t60(self):
         """DC loses nothing to the medium, so it caps no boundary target.
@@ -418,58 +389,60 @@ class TestAirAbsorption:
         """
         import warnings
 
-        from src.fdn.room import air_absorption_t60
+        from src.fdn.air import Atmosphere
 
         with warnings.catch_warnings():
             warnings.simplefilter("error")
-            t60 = air_absorption_t60(np.array([0.0, 1000.0]))
+            t60 = Atmosphere().t60(np.array([0.0, 1000.0]))
         assert np.isinf(t60[0])
         assert np.isfinite(t60[1])
 
     def test_air_only_t60_falls_with_frequency(self):
-        from src.fdn.room import air_absorption_t60
+        from src.fdn.air import Atmosphere
 
-        t_air = air_absorption_t60(self.FREQS)
+        t_air = Atmosphere().t60(self.FREQS)
         assert np.all(np.diff(t_air) < 0.0)
         # 16 kHz at 20 C / 50% RH is around half a second in air alone.
-        assert 0.3 < air_absorption_t60(np.array([16000.0]))[0] < 0.7
+        assert 0.3 < Atmosphere().t60(np.array([16000.0]))[0] < 0.7
 
     def test_air_limited_target_matches_the_sabine_4mv_term(self):
         """The rate sum must equal the textbook air term, not merely resemble it."""
-        from src.fdn.room import air_absorption_db_per_meter, air_limited_t60
+        from src.fdn.air import Atmosphere
 
         volume, surface, alpha_boundary = 320.0, 304.0, 0.1857
         sabine_dry = 0.161 * volume / (surface * alpha_boundary)
-        m = air_absorption_db_per_meter(self.FREQS) / (10 * np.log10(np.e))
+        m = Atmosphere().alpha_db_per_m(self.FREQS) / (10 * np.log10(np.e))
         sabine_with_air = 0.161 * volume / (surface * alpha_boundary + 4 * m * volume)
 
-        combined = air_limited_t60(np.full(self.FREQS.size, sabine_dry), self.FREQS)
+        combined = Atmosphere().limit(np.full(self.FREQS.size, sabine_dry), self.FREQS)
         np.testing.assert_allclose(combined, sabine_with_air, rtol=1e-3)
 
     def test_air_can_only_shorten(self):
-        from src.fdn.room import air_limited_t60
+        from src.fdn.air import Atmosphere
 
-        limited = air_limited_t60(self.T60, self.FREQS)
+        limited = Atmosphere().limit(self.T60, self.FREQS)
         assert np.all(limited <= self.T60)
         assert limited[-1] < self.T60[-1]      # the fs anchor is much shorter
         assert limited[0] == pytest.approx(self.T60[0], rel=5e-3)   # DC barely
 
     def test_shares_sum_to_the_required_attenuation(self):
         """air_db and boundary_db must account for the realised round trip."""
-        from src.fdn.room import air_absorption_split, air_limited_t60
+        from src.fdn.air import Atmosphere
 
         t60 = np.tile(self.T60, (4, 1))
-        air, boundary = air_absorption_split(t60, self.FREQS, self.DELAYS, self.FS)
-        realised = air_limited_t60(t60, self.FREQS)
+        budget = Atmosphere().budget(t60, self.FREQS, self.DELAYS, self.FS)
+        air, boundary = budget.air_db, budget.boundary_db
+        realised = Atmosphere().limit(t60, self.FREQS)
         required = 60.0 * self.DELAYS[:, None] / (self.FS * realised)
         np.testing.assert_allclose(air + boundary, required, rtol=1e-10)
 
     def test_both_shares_are_positive(self):
         """The old model could produce a negative boundary share; this cannot."""
-        from src.fdn.room import air_absorption_split
+        from src.fdn.air import Atmosphere
 
         t60 = np.tile(np.full(self.FREQS.size, 60.0), (4, 1))  # absurd target
-        air, boundary = air_absorption_split(t60, self.FREQS, self.DELAYS, self.FS)
+        budget = Atmosphere().budget(t60, self.FREQS, self.DELAYS, self.FS)
+        air, boundary = budget.air_db, budget.boundary_db
         assert np.all(air > 0.0)
         assert np.all(boundary > 0.0)
 

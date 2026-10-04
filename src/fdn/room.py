@@ -1,6 +1,5 @@
 """Room-acoustics helpers shared by both directional networks.
 
-* Air absorption (ISO 9613-1) and its place in a T60 target.
 * The delay-line range a room's mean free path implies.
 * Image-source early reflections for a shoebox room.
 """
@@ -12,248 +11,8 @@ from dataclasses import dataclass
 import numpy as np
 from numpy.typing import NDArray
 
-from ..utils import db2lin
-
-# Speed of sound constant (m/s) — used for air absorption and delay range
-_SPEED_OF_SOUND = 343.0
-
-
-def air_absorption_db_per_meter(
-    freqs: NDArray,
-    temperature_c: float = 20.0,
-    humidity_percent: float = 50.0,
-    pressure_kpa: float = 101.325,
-) -> NDArray:
-    """Atmospheric absorption coefficient (dB/m) per ISO 9613-1:1993.
-
-    Implements the full O2 / N2 vibrational-relaxation model, valid roughly
-    for 50 Hz - 10 MHz, 0-100 % relative humidity, and a wide temperature
-    range. Returns positive values (attenuation).
-
-    Parameters
-    ----------
-    freqs : NDArray
-        Frequencies in Hz.
-    temperature_c : float
-        Air temperature in degrees Celsius.
-    humidity_percent : float
-        Relative humidity in **percent** (0\u2013100).  Note the convention:
-        :func:`pyfar.constants.air_attenuation`, the same standard, takes a
-        0\u20131 fraction instead.  Passing ``0.5`` here means 0.5\u202f% relative
-        humidity, which is legal and very dry, so no validation catches
-        that confusion -- only reading this line can.
-    pressure_kpa : float
-        Ambient atmospheric pressure in kPa (reference 101.325).
-
-    Returns
-    -------
-    NDArray
-        Absorption coefficient \u03b1 in dB/m.
-
-    Raises
-    ------
-    ValueError
-        If the atmosphere is unphysical or the frequencies are negative.
-        \u03b1 goes as ``f\u00b2`` and is smooth in humidity, so out-of-range inputs
-        otherwise return plausible numbers rather than failing.
-
-    References
-    ----------
-    ISO 9613-1:1993, "Acoustics \u2014 Attenuation of sound during propagation
-    outdoors \u2014 Part 1: Calculation of the absorption of sound by the
-    atmosphere."
-    """
-    f = np.asarray(freqs, dtype=float)
-    if np.any(f < 0.0):
-        raise ValueError(
-            "Frequencies must be non-negative; alpha goes as f^2, so a sign "
-            "error would otherwise pass silently."
-        )
-    if not 0.0 <= humidity_percent <= 100.0:
-        raise ValueError(
-            f"Relative humidity must be a percentage in [0, 100], got "
-            f"{humidity_percent}. pyfar's air_attenuation takes a 0-1 "
-            "fraction; this takes percent."
-        )
-    if temperature_c <= -273.15:
-        raise ValueError(
-            f"Temperature must be above absolute zero, got {temperature_c} C."
-        )
-    if pressure_kpa <= 0.0:
-        raise ValueError(
-            f"Atmospheric pressure must be positive, got {pressure_kpa} kPa."
-        )
-    T = temperature_c + 273.15           # K
-    T0 = 293.15                          # reference temperature (20 \u00b0C)
-    T01 = 273.16                         # triple point of water
-    pa = pressure_kpa
-    pr = 101.325                         # reference pressure
-    pa_pr = pa / pr
-
-    # Saturation vapour pressure ratio psat/pr (ISO 9613-1, Annex B)
-    V = 10.79586 * (1.0 - T01 / T) \
-        - 5.02808 * np.log10(T / T01) \
-        + 1.50474e-4 * (1.0 - 10.0 ** (-8.29692 * (T / T01 - 1.0))) \
-        + 0.42873e-3 * (-1.0 + 10.0 ** (4.76955 * (1.0 - T01 / T))) \
-        - 2.2195983
-    psat_pr = 10.0 ** V
-
-    # Molar concentration of water vapour, %
-    h = humidity_percent * psat_pr / pa_pr
-
-    # Relaxation frequencies (Hz) for O2 and N2
-    frO = pa_pr * (
-        24.0 + 4.04e4 * h * (0.02 + h) / (0.391 + h)
-    )
-    frN = pa_pr * (T / T0) ** -0.5 * (
-        9.0 + 280.0 * h * np.exp(-4.170 * ((T / T0) ** (-1.0 / 3.0) - 1.0))
-    )
-
-    # Absorption coefficient \u03b1 in nepers/m, then convert to dB/m
-    f2 = f * f
-    alpha = (
-        8.686 * f2 * (
-            1.84e-11 * (1.0 / pa_pr) * np.sqrt(T / T0)
-            + (T / T0) ** -2.5 * (
-                0.01275 * np.exp(-2239.1 / T) / (frO + f2 / frO)
-                + 0.1068 * np.exp(-3352.0 / T) / (frN + f2 / frN)
-            )
-        )
-    )
-    return alpha
-
-
-def air_absorption_t60(
-    freqs: NDArray,
-    *,
-    temperature_c: float = 20.0,
-    humidity_percent: float = 50.0,
-    pressure_kpa: float = 101.325,
-    speed_of_sound: float = _SPEED_OF_SOUND,
-) -> NDArray:
-    """Reverberation time the medium alone would impose, in seconds.
-
-    Sound travelling ``c`` metres per second through air losing
-    ``alpha`` dB per metre falls 60 dB in ``60 / (alpha * c)`` seconds,
-    independently of any room.  This is the ceiling on T60 at each frequency:
-    no boundary treatment can make a room ring longer than its air allows.
-
-    Parameters
-    ----------
-    freqs : NDArray
-        Frequencies in Hz.
-    temperature_c, humidity_percent, pressure_kpa : float
-        Atmospheric conditions, passed to :func:`air_absorption_db_per_meter`.
-    speed_of_sound : float
-        Propagation speed in m/s.
-
-    Returns
-    -------
-    NDArray
-        T60 in seconds, one per frequency.  Falls steeply above a few kHz.
-        Infinite where alpha is zero -- DC loses nothing to the medium, so it
-        caps no boundary target.
-    """
-    alpha_db_per_m = air_absorption_db_per_meter(
-        np.asarray(freqs, dtype=float),
-        temperature_c=temperature_c,
-        humidity_percent=humidity_percent,
-        pressure_kpa=pressure_kpa,
-    )
-    rate = alpha_db_per_m * speed_of_sound
-    return np.divide(
-        60.0, rate, out=np.full_like(rate, np.inf), where=rate > 0.0
-    )
-
-
-def air_limited_t60(
-    t60_boundary_s: NDArray, freqs: NDArray, **atmosphere: float
-) -> NDArray:
-    """Combine boundary and medium decay into a realisable T60 target.
-
-    Decay rates add, so
-
-    .. math::
-        \frac{1}{T_{60}} = \frac{1}{T_\text{boundary}} + \frac{1}{T_\text{air}}
-
-    which is algebraically the ``4mV`` air term of the standard Sabine and
-    Eyring formulae, ``T60 = 0.161 V / (S alpha + 4 m V)``, rewritten without
-    reference to a specific room.
-
-    This is where air absorption belongs in an FDN.  Every reference
-    implementation -- fdnToolbox's ``absorptionGEQ``, ``onePoleAbsorption`` and
-    ``firstOrderAbsorption``; the ``pyFDN`` translations of them; the DAFx24
-    tutorial's ``absorption_filter`` -- takes reverberation time and delay
-    lengths and nothing else.  None models a propagation medium, so the medium
-    has to reach the network through the target it is asked to realise.
-
-    Parameters
-    ----------
-    t60_boundary_s : NDArray
-        Target T60 in seconds from boundary absorption alone.  Shape
-        ``(n_bands,)`` or ``(N, n_bands)``.
-    freqs : NDArray, shape (n_bands,)
-        Frequencies in Hz at which the target is specified.
-    **atmosphere
-        Forwarded to :func:`air_absorption_t60`.
-
-    Returns
-    -------
-    NDArray
-        Realisable T60 in seconds, never longer than *t60_boundary_s* and
-        appreciably shorter above a few kHz.
-    """
-    t60_boundary_s = np.asarray(t60_boundary_s, dtype=float)
-    t_air = air_absorption_t60(freqs, **atmosphere)
-    return 1.0 / (1.0 / t60_boundary_s + 1.0 / t_air)
-
-
-def air_absorption_split(
-    t60_boundary_s: NDArray,
-    freqs: NDArray,
-    delays: NDArray,
-    fs: float,
-    **atmosphere: float,
-) -> tuple[NDArray, NDArray]:
-    """Split the round-trip attenuation into medium and boundary shares.
-
-    A diagnostic companion to :func:`air_limited_t60`, saying how much of each
-    delay line's per-round-trip loss the air supplies and how much the
-    boundary does.  Because decay rates add, so do the attenuations, and the
-    two shares sum exactly to the loss required by the combined target.
-
-    Both shares are positive by construction.  An earlier formulation
-    subtracted the air share from a fixed budget and could report a negative
-    boundary share, meaning the requested T60 was longer than air alone
-    permits; under the combined model that situation cannot arise, because the
-    air share shortens the target instead of competing with it.
-
-    Parameters
-    ----------
-    t60_boundary_s : NDArray, shape (N, n_bands) or (n_bands,)
-        Boundary-only target T60 in seconds.
-    freqs : NDArray, shape (n_bands,)
-        Frequencies in Hz.
-    delays : NDArray, shape (N,)
-        Delay-line lengths in samples.  The air share is computed over the
-        physical propagation path they represent.
-    fs : float
-        Sample rate in Hz.
-    **atmosphere
-        Forwarded to :func:`air_absorption_t60`.
-
-    Returns
-    -------
-    air_db, boundary_db : NDArray, shape (N, n_bands)
-        Attenuation in dB per round trip attributed to each.
-    """
-    t60_boundary_s = np.atleast_2d(np.asarray(t60_boundary_s, dtype=float))
-    delays = np.asarray(delays, dtype=float).ravel()[:, np.newaxis]
-    t_air = air_absorption_t60(freqs, **atmosphere)[np.newaxis, :]
-
-    air_db = 60.0 * delays / (fs * t_air)
-    boundary_db = 60.0 * delays / (fs * np.maximum(t60_boundary_s, 1e-6))
-    return air_db, boundary_db
+from .air import SPEED_OF_SOUND as _SPEED_OF_SOUND
+from .air import Atmosphere
 
 
 def delay_range_from_room(
@@ -400,10 +159,7 @@ def shoebox_reflections(
     order: int = 1,
     freqs: NDArray | None = None,
     t60_per_band_s: NDArray | None = None,
-    air_absorption: bool = True,
-    temperature_c: float = 20.0,
-    humidity_percent: float = 50.0,
-    pressure_kpa: float = 101.325,
+    air_absorption: bool | Atmosphere = False,
 ) -> list[Reflection]:
     """Image-source early reflections for a shoebox room.
 
@@ -443,11 +199,11 @@ def shoebox_reflections(
     t60_per_band_s : NDArray, optional
         Reverberation time per band, in seconds, giving frequency-dependent
         wall loss.
-    air_absorption : bool
+    air_absorption : bool or Atmosphere
         Apply ISO 9613-1 atmospheric loss over each reflection's own path
-        length.  Only meaningful per band, so it is ignored without *freqs*.
-    temperature_c, humidity_percent, pressure_kpa : float
-        Atmospheric conditions.
+        length: ``True`` for the default :class:`~src.fdn.air.Atmosphere`, or an
+        instance for other conditions. Only meaningful per band, so it is
+        ignored without *freqs*. Default ``False``.
 
     Returns
     -------
@@ -463,15 +219,10 @@ def shoebox_reflections(
     if per_band:
         freqs = np.asarray(freqs, dtype=float)
         r_wall_band = _wall_reflectivity(room, t60_per_band_s, model)
-        alpha_air = (
-            air_absorption_db_per_meter(
-                freqs,
-                temperature_c=temperature_c,
-                humidity_percent=humidity_percent,
-                pressure_kpa=pressure_kpa,
-            )
-            if air_absorption
-            else np.zeros_like(freqs)
+        atmosphere = (
+            air_absorption
+            if isinstance(air_absorption, Atmosphere)
+            else Atmosphere() if air_absorption else None
         )
     r_wall = float(_wall_reflectivity(room, t60_broadband_s, model))
 
@@ -484,11 +235,9 @@ def shoebox_reflections(
         if per_band:
             # Wall loss compounds once per bounce; air loss accrues over the
             # whole path the reflection actually travelled.
-            band_gains = (
-                r_wall_band**reflection_order
-                * db2lin(-alpha_air * distance)
-                / distance
-            )
+            band_gains = r_wall_band**reflection_order / distance
+            if atmosphere is not None:
+                band_gains = band_gains * atmosphere.path_gain(freqs, distance)
 
         reflections.append(
             Reflection(
