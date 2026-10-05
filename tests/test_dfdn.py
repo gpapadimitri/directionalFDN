@@ -6,20 +6,20 @@ import numpy as np
 import pyFDN
 import pytest
 
-from src.fdn.directional_fdn import DirectionalFDN
-from src.fdn.fdn_components import (
+from src.dfdn_2019 import DFDN2019
+from src.directional_fdn import DirectionalFDN
+from src.fdn_components import (
     FeedbackMatrix,
     FeedbackMatrixType,
     generate_distinct_delay_lengths,
     geq_band_frequencies,
 )
-from src.fdn.planewave_dfdn import PlaneWaveDFDN
-from src.fdn.room import Reflection
-from src.fdn.spatial import (
+from src.room import Reflection
+from src.spatial import (
     encode_directions,
     uniform_directions,
 )
-from src.fdn.transform import DirectionalWeighting
+from src.transform import DirectionalWeighting
 from src.utils import db2lin, lin2db, ms_to_samps
 
 # ======================================================================
@@ -126,9 +126,9 @@ class TestFeedbackMatrix:
 # Directional FDN
 # ======================================================================
 
-class TestDirectionalFDN:
+class TestDFDN2019:
     def _make_dfdn(self, seed=42):
-        dfdn = DirectionalFDN(
+        dfdn = DFDN2019(
             sample_rate=48000,
             num_delay_line_groups=4,
             ambisonics_order=1,
@@ -260,8 +260,8 @@ class TestDirectionalWeighting:
 # Plane-Wave DFDN (ICASSP 2020)
 # ======================================================================
 
-class TestPlaneWaveDFDN:
-    """Tests for the ICASSP 2020 Plane-Wave Domain DFDN."""
+class TestDirectionalFDN:
+    """Tests for the ICASSP 2020 grid-based DirectionalFDN."""
 
     @staticmethod
     def _make(
@@ -269,8 +269,8 @@ class TestPlaneWaveDFDN:
         L: int = 1,
         t60: float = 800.0,
         seed: int = 42,
-    ) -> PlaneWaveDFDN:
-        pw = PlaneWaveDFDN(
+    ) -> DirectionalFDN:
+        pw = DirectionalFDN(
             sample_rate=48000,
             num_delay_line_groups=N,
             sh_order=L,
@@ -330,7 +330,7 @@ class TestPlaneWaveDFDN:
 
     def test_directional_t60(self):
         """Direction-dependent T60 should produce anisotropic output."""
-        pw = PlaneWaveDFDN(
+        pw = DirectionalFDN(
             sample_rate=48000,
             num_delay_line_groups=4,
             sh_order=1,
@@ -353,7 +353,7 @@ class TestPlaneWaveDFDN:
 
     def test_freq_dependent_isotropic(self):
         """Frequency-dependent but isotropic T60 (n_bands,) — most common case."""
-        pw = PlaneWaveDFDN(
+        pw = DirectionalFDN(
             sample_rate=48000,
             num_delay_line_groups=4,
             sh_order=1,
@@ -372,7 +372,7 @@ class TestPlaneWaveDFDN:
 
     def test_freq_dependent_t60(self):
         """Frequency-dependent + direction-dependent T60."""
-        pw = PlaneWaveDFDN(
+        pw = DirectionalFDN(
             sample_rate=48000,
             num_delay_line_groups=4,
             sh_order=1,
@@ -405,7 +405,7 @@ class TestEarlyReflections:
     def test_er_grid_signal_is_vbap_panned(self):
         """Eqs. 4-5: each reflection lands on the grid, at its own delay,
         panned toward its own direction."""
-        pw = PlaneWaveDFDN(
+        pw = DirectionalFDN(
             sample_rate=48000, num_delay_line_groups=4, sh_order=1,
             seed=42,
         )
@@ -448,7 +448,7 @@ class TestEarlyReflections:
 
     def test_er_injection(self):
         """Early reflections should appear at their expected delay times."""
-        pw = PlaneWaveDFDN(
+        pw = DirectionalFDN(
             sample_rate=48000,
             num_delay_line_groups=4,
             sh_order=1,
@@ -503,7 +503,7 @@ class TestAirAbsorptionAccounting:
         return out.mean(axis=0) * 1e3
 
     def _make(self, air, t60_ms=None):
-        pw = PlaneWaveDFDN(
+        pw = DirectionalFDN(
             sample_rate=48000,
             num_delay_line_groups=4,
             sh_order=1,
@@ -559,12 +559,38 @@ class TestAirAbsorptionAccounting:
         model an unreachable target is not an error to report, it is simply
         pulled down toward what the medium allows.
         """
-        from src.fdn.room import air_absorption_t60
+        from src.air import Atmosphere
 
         t60 = self.t60_ms.copy()
         t60[-1] = 5000.0
         pw = self._make(True, t60_ms=t60)
-        ceiling = air_absorption_t60(self.freqs)[-1]
+        ceiling = Atmosphere().t60(self.freqs)[-1]
         realised_top = pw.realised_t60_s[:, -1].mean()
         assert realised_top < 5.0 * 0.5
         assert realised_top < ceiling
+
+
+@pytest.mark.parametrize(
+    "t60", [-800.0, np.full(10, -1200.0), np.full(10, np.nan), np.zeros(10), 0.0],
+    ids=["neg-scalar", "neg-bands", "nan", "zero-bands", "zero-scalar"],
+)
+def test_setup_rejects_a_non_positive_or_non_finite_t60(t60):
+    """A negative T60 designs a gain above one: 10 bands of -1200 ms grew 280 dB."""
+    pw = DirectionalFDN(48000, 4, sh_order=1, seed=1)
+    with pytest.raises(ValueError, match="finite and positive"):
+        pw.setup(delay_range_ms=(10, 30), t60_per_direction_ms=t60)
+
+
+def test_zero_length_render_is_empty_not_an_error():
+    pw = DirectionalFDN(48000, 4, sh_order=1, seed=1)
+    pw.setup(delay_range_ms=(10, 30), t60_per_direction_ms=800.0)
+    assert pw.render(0.0, 0.0, 0.0).shape == (4, 0)
+    assert pw.render(0.0, 0.0, 0.0, grid_output=True).shape == (pw.Q, 0)
+
+
+@pytest.mark.parametrize("az, el", [(np.nan, 0.0), (0.0, np.nan), (np.inf, 0.0)])
+def test_non_finite_source_direction_raises_a_clear_error(az, el):
+    pw = DirectionalFDN(48000, 4, sh_order=1, seed=1)
+    pw.setup(delay_range_ms=(10, 30), t60_per_direction_ms=800.0)
+    with pytest.raises(ValueError, match="finite direction"):
+        pw.render(az, el, 0.1)

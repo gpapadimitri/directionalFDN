@@ -1,36 +1,46 @@
-"""Frequency-Dependent Directional FDN (Plane-Wave Domain).
+"""Directional Feedback Delay Network on a spatial grid.
 
-Implementation of Alary & Politis (2020) *"Frequency-Dependent Directional
-Feedback Delay Network"*, ICASSP 2020.
+Implementation of Alary & Politis, *"Frequency-Dependent Directional Feedback
+Delay Network"*, ICASSP 2020, 176-180: "a multichannel representation of
+delay-line groups where each channel corresponds to an incident direction on a
+spatial grid of Q directions" (Sec. 3). This is the package's working
+reverberator. The spherical-harmonic formulation it replaces (Alary et al.,
+J. Audio Eng. Soc. 67(10), 2019) is kept for comparison as
+:class:`~src.dfdn_2019.DFDN2019`.
 
 Architecture
 ------------
-Unlike the JAES 2019 DFDN (which operates in the SH domain with DWM
-transforms), this formulation works in the **plane-wave domain** where
-each channel of a delay-line group corresponds directly to an incident
-direction on a spatial grid of Q points.
+1. **Per-direction absorption filters**: each of the Q channels in each
+   delay-line group gets its own filter for T60(w, phi, theta) (Eqs. 6-10).
+2. **Independent delay lengths** within a group, which raises echo density
+   (Fig. 4).
+3. **No directional weighting transform**: the feedback ``A kron I_Q`` never
+   mixes directions, so each keeps the decay its filter was designed for.
+4. **Early reflection module**: reflections VBAP-panned onto the grid
+   (Eqs. 3-5) and added to delay-line group ``lambda`` after its delay
+   (Eq. 12). The paper taps them into the line at ``m_i - l_r``; adding a
+   signal that already carries its ``l_r`` offsets is equivalent.
+5. **Output encoder E** (Eq. 13): Ambisonics, loudspeakers or binaural.
 
-Key differences from :class:`DirectionalFDN`:
-
-1. **Per-direction absorption filters** — each of the Q channels in each
-   delay-line group gets its own IIR filter parameterised by
-   T60(ω, φ, θ) (Eqs. 6–10).
-2. **Independent delay lengths** within a group — each of the Q channels
-   has a randomly-chosen delay length, improving echo density (Fig. 4).
-3. **No DWM transform** — directional shaping is handled entirely by
-   the per-channel filters.
-4. **Early reflection module** — VBAP-encoded reflections summed into
-   ``s'(n)`` (Eqs. 4–5) and added to delay-line group ``lambda`` after its
-   delay, per Eq. 12.  The paper describes the same thing as tapping into
-   the line at ``m_i - l_r``; adding a signal that already carries its
-   ``l_r`` offsets is equivalent and needs no per-line write logic.
-5. **Output encoding matrix E** — converts grid signals to Ambisonics,
-   loudspeaker, or binaural format (Eq. 13).
+Terminology
+-----------
+The paper names its channels incident directions on a grid, never plane waves.
+The same authors later describe them as "incident plane-waves distributed
+around a sphere" (Alary & Valimaki, I3DA 2021) and "a discrete set of incident
+plane waves represented on a spherical grid" (Alary, Politis & Bilbao, AES
+AVAR 2024). That holds for the late field under the Ambisonic encoder
+``E = Y(L, U_grid)``: each channel is encoded exactly as a far-field plane wave,
+and the channels are mutually uncorrelated. It is not a plane-wave
+decomposition. Q exceeds (L+1)^2 and E carries no quadrature weights, so the
+grid holds directional detail above order L that the encoded output discards.
+The direct sound and the early reflections are VBAP-panned onto grid triplets
+(Eqs. 3-5): unless they arrive on a grid direction they are spread sources, not
+plane waves.
 
 Usage
 -----
->>> from src.fdn.planewave_dfdn import PlaneWaveDFDN
->>> pw = PlaneWaveDFDN(
+>>> from src.directional_fdn import DirectionalFDN
+>>> pw = DirectionalFDN(
 ...     sample_rate=48000,
 ...     num_delay_line_groups=8,
 ...     sh_order=2,  # Q ≥ (L+1)² grid points
@@ -41,20 +51,25 @@ Usage
 ... )
 
 The frequency axis is the graphic EQ's own design grid; build targets against
-:func:`~src.fdn.fdn_components.geq_band_frequencies`.
+:func:`~src.fdn_components.geq_band_frequencies`.
 >>> rir = pw.render(source_azimuth=0.0, source_elevation=0.0,
 ...                  length_seconds=1.0)
 """
 
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
 import pyFDN
 from numpy.typing import NDArray
+from pyFDN.eq import gain_to_geq
 from pyFDN.td import SOSBank
+from scipy.signal import sosfilt
 
-from ..utils import db2lin
 from . import spatial
+from .air import AirBudget, Atmosphere
+from .analysis import band_energy
 from .fdn_components import (
     GEQ_NUM_BANDS,
     FeedbackMatrix,
@@ -63,7 +78,8 @@ from .fdn_components import (
     generate_delay_lengths,
     geq_band_frequencies,
 )
-from .room import Reflection, air_absorption_split, air_limited_t60
+from .room import Reflection
+from .utils import db2lin
 
 # ---------------------------------------------------------------------------
 # Early Reflection Module (Eqs. 3–5)
@@ -96,8 +112,8 @@ class EarlyReflectionModule:
     """Early reflection set for the ICASSP 2020 module (Eqs. 3-5).
 
     Holds the reflections; the panning happens in
-    :meth:`PlaneWaveDFDN._build_er_grid_signal`, which places each one on the
-    plane-wave grid with VBAP exactly as Eqs. 4-5 specify.  The reflections
+    :meth:`DirectionalFDN._build_er_grid_signal`, which places each one on the
+    grid with VBAP exactly as Eqs. 4-5 specify.  The reflections
     therefore share the grid with the direct sound and the recirculating
     signals, and reach the output through the single encoder ``E`` of Eq. 13.
 
@@ -121,7 +137,7 @@ class EarlyReflectionModule:
 
 
 # ---------------------------------------------------------------------------
-# Plane-Wave DFDN
+# Directional FDN
 # ---------------------------------------------------------------------------
 
 class _EarlyReflectionInjection:
@@ -168,13 +184,12 @@ class _EarlyReflectionInjection:
         return self._absorption.process_block(block)
 
 
-class PlaneWaveDFDN:
-    """Frequency-Dependent Directional FDN (ICASSP 2020).
+class DirectionalFDN:
+    """Directional FDN on a spatial grid (Alary & Politis, ICASSP 2020).
 
-    Operates in the plane-wave domain: each channel of a delay-line group
-    corresponds to a direction on a Q-point spatial grid.  Per-channel
-    absorption filters provide both frequency- and direction-dependent
-    T60 control.
+    Each channel of a delay-line group corresponds to an incident direction
+    on a Q-point grid.  Per-channel absorption filters set both the frequency-
+    and the direction-dependent T60.
 
     Parameters
     ----------
@@ -186,7 +201,7 @@ class PlaneWaveDFDN:
         SH order *L* controlling grid density: Q ≥ (L+1)².
     output_sh_order : int, optional
         SH order of the rendered Ambisonics RIR.  Defaults to *sh_order*.
-        Setting this lower than *sh_order* lets you keep a dense plane-wave
+        Setting this lower than *sh_order* lets you keep a dense
         grid (better directional resolution inside the FDN) while emitting
         a lower-order Ambisonics output (e.g. ``sh_order=3``,
         ``output_sh_order=1`` to render a FOA RIR).
@@ -199,10 +214,12 @@ class PlaneWaveDFDN:
     realised_t60_s : NDArray or None
         The T60 actually designed for, shape ``(N*Q, n_bands)``.  Equals the
         requested target unless ``air_absorption`` shortened it.
-    air_attenuation_db, boundary_attenuation_db : NDArray or None
+    air_budget : AirBudget or None
         Per-round-trip attenuation in dB attributed to the medium and to the
-        boundary, shape ``(N*Q, n_bands)``.  Set only when ``air_absorption``
-        is enabled; they sum to the loss the realised target requires.
+        boundary, shape ``(N*Q, n_bands)``, which sum to the loss the realised
+        target requires.  Set only when ``air_absorption`` is enabled.
+        :attr:`air_attenuation_db` and :attr:`boundary_attenuation_db` read its
+        two shares.
     """
 
     def __init__(
@@ -234,18 +251,29 @@ class PlaneWaveDFDN:
         self.delay_length_samps: NDArray | None = None
         self.absorption_gains: NDArray | None = None  # broadband, per line
         self.absorption_sos: NDArray | None = None
-        self.air_attenuation_db: NDArray | None = None
-        self.boundary_attenuation_db: NDArray | None = None
+        self.air_budget: AirBudget | None = None
         self.realised_t60_s: NDArray | None = None
         self._kronecker_matrix: NDArray | None = None
         self._base_feedback: FeedbackMatrix | None = None
         self._encoding_matrix: NDArray | None = None  # E (Eq. 13)
         self._early_reflections: EarlyReflectionModule | None = None
         self._input_distribution: NDArray | None = None  # b_i, Sec. 3
+        self._er_injected = True
+        self._p0_sos: NDArray | None = None
 
         # Grid directions
         self.grid_azimuths: NDArray | None = None
         self.grid_elevations: NDArray | None = None
+
+    @property
+    def air_attenuation_db(self) -> NDArray | None:
+        """Medium share of the round-trip attenuation, ``(N*Q, n_bands)``."""
+        return None if self.air_budget is None else self.air_budget.air_db
+
+    @property
+    def boundary_attenuation_db(self) -> NDArray | None:
+        """Boundary share of the round-trip attenuation, ``(N*Q, n_bands)``."""
+        return None if self.air_budget is None else self.air_budget.boundary_db
 
     # ==================================================================
     # Grid generation
@@ -284,11 +312,11 @@ class PlaneWaveDFDN:
         t60_per_direction_ms: NDArray | float = 800.0,
         *,
         feedback_type: FeedbackMatrixType = FeedbackMatrixType.RANDOM,
-        air_absorption: bool = False,
+        air_absorption: bool | Atmosphere = False,
         lambda_group: int = 0,
         rng: np.random.Generator | None = None,
     ) -> None:
-        """Initialise all components of the plane-wave DFDN.
+        """Initialise all components of the network.
 
         Parameters
         ----------
@@ -306,23 +334,24 @@ class PlaneWaveDFDN:
               Row *q* gives the T60 for grid direction *q*.
 
             The ten frequency values are read at
-            :func:`~src.fdn.fdn_components.geq_band_frequencies`, the grid
+            :func:`~src.fdn_components.geq_band_frequencies`, the grid
             the graphic EQ designs on: octave centres 31.25 Hz to 16 kHz,
             interpolated linearly in hertz between them and held beyond.
         feedback_type : FeedbackMatrixType
             Type of base N×N feedback matrix.
-        air_absorption : bool, optional
+        air_absorption : bool or Atmosphere, optional
             Treat *t60_per_direction_ms* as the **boundary-only** target and
-            add atmospheric absorption (ISO 9613-1) on top of it, so the
-            realised decay is ``1/T = 1/T_boundary + 1/T_air`` -- the ``4mV``
-            term of Sabine and Eyring.  The realised T60 is therefore shorter
-            than requested, appreciably so above a few kHz, and is recorded in
+            add atmospheric absorption (ISO 9613-1) on top of it: ``True`` for
+            the default :class:`~src.air.Atmosphere`, or an instance for
+            other conditions.  The realised decay is
+            ``1/T = 1/T_boundary + 1/T_air`` -- the ``4mV`` term of Sabine and
+            Eyring.  The realised T60 is therefore shorter than requested,
+            appreciably so above a few kHz, and is recorded in
             :attr:`realised_t60_s`.  The medium and boundary shares of each
-            round trip are exposed as :attr:`air_attenuation_db` and
-            :attr:`boundary_attenuation_db`.  Requires a frequency-dependent
-            T60; ignored with a warning for a broadband one, whose single
-            value cannot carry a frequency-dependent medium.  Default
-            ``False``.
+            round trip are exposed as :attr:`air_budget`.  Requires a
+            frequency-dependent T60; ignored with a warning for a broadband one,
+            whose single value cannot carry a frequency-dependent medium.
+            Default ``False``.
         lambda_group : int, optional
             Index of the delay-line group that receives the early-reflection
             re-injection ``s'(n)`` (Eq. 12).  Default ``0``.
@@ -353,6 +382,13 @@ class PlaneWaveDFDN:
 
         # 3. Per-direction absorption
         t60 = np.asarray(t60_per_direction_ms, dtype=float)
+        if not np.all(np.isfinite(t60) & (t60 > 0.0)):
+            raise ValueError(
+                "t60_per_direction_ms must be finite and positive; a negative T60 "
+                "designs a gain above one and the network diverges."
+            )
+        #the previous setup's shaping was fitted to its tail, not this one's
+        self._p0_sos = None
         freqs = geq_band_frequencies()
 
         # A (Q,) target is broadband per direction and a (GEQ_NUM_BANDS,) one
@@ -388,12 +424,11 @@ class PlaneWaveDFDN:
                 f"t60_per_direction_ms must be scalar, ({GEQ_NUM_BANDS},), "
                 f"(Q={Q},), or (Q={Q}, {GEQ_NUM_BANDS}), got shape "
                 f"{t60.shape}. The frequency axis is the GEQ design grid; see "
-                "src.fdn.fdn_components.geq_band_frequencies."
+                "src.fdn_components.geq_band_frequencies."
             )
         # Branch on the shape actually computed above: a (Q,) T60 is
         # broadband-per-channel and must take the scalar-gain path.
-        self.air_attenuation_db = None
-        self.boundary_attenuation_db = None
+        self.air_budget = None
         self.realised_t60_s = None
         if t60_expanded.ndim == 1:
             # Broadband: one scalar gain per channel, round trip = m exactly.
@@ -403,8 +438,6 @@ class PlaneWaveDFDN:
             )
             self.absorption_sos = None
             if air_absorption:
-                import warnings
-
                 warnings.warn(
                     "air_absorption is ignored for a broadband T60: the "
                     "absorption coefficient is frequency-dependent, so the "
@@ -417,14 +450,15 @@ class PlaneWaveDFDN:
         else:
             t60_2d = t60_expanded * 1e-3
             if air_absorption:
-                # The medium enters through the target, which is the only place
-                # an FDN has for it: every reference implementation designs
-                # absorption from reverberation time and delay lengths alone.
-                # Summing decay rates is the 4mV term of Sabine and Eyring.
-                self.air_attenuation_db, self.boundary_attenuation_db = (
-                    air_absorption_split(t60_2d, freqs, all_lengths, self.sample_rate)
+                atmosphere = (
+                    air_absorption
+                    if isinstance(air_absorption, Atmosphere)
+                    else Atmosphere()
                 )
-                t60_2d = air_limited_t60(t60_2d, freqs)
+                self.air_budget = atmosphere.budget(
+                    t60_2d, freqs, all_lengths, self.sample_rate
+                )
+                t60_2d = atmosphere.limit(t60_2d, freqs)
             self.realised_t60_s = np.broadcast_to(
                 t60_2d, (N * Q, GEQ_NUM_BANDS)
             ).copy()
@@ -437,17 +471,152 @@ class PlaneWaveDFDN:
         self._init_ambisonics_encoding()
 
     def set_early_reflections(
-        self, reflections: list[Reflection]
+        self, reflections: list[Reflection], *, injected: bool = True,
     ) -> None:
-        """Configure the early reflection module (Eqs. 3–5).
+        """Configure the early reflection module (Eqs. 3-5).
 
         Must be called after :meth:`setup` so that the grid is available.
+
+        Parameters
+        ----------
+        reflections : list[Reflection]
+        injected : bool
+            ``True`` (default): join group lambda after its delay and
+            recirculate, ICASSP 2020 Eq. 12. ``False``: add them to the grid
+            alongside the network, Alary and Valimaki (I3DA 2021, Sec. III B),
+            leaving group lambda's input in place. Required for
+            :meth:`set_initial_power`, which would otherwise filter them.
         """
         if self.grid_azimuths is None:
             raise RuntimeError("Call setup() before set_early_reflections().")
         self._early_reflections = EarlyReflectionModule(
             reflections, self.output_sh_order,
         )
+        self._er_injected = bool(injected)
+
+    def set_initial_power(self, p0_db: NDArray | float | None) -> None:
+        """Shape the network's initial power per grid direction and band.
+
+        Power gain in dB relative to the network's natural, flat initial power
+        (Gallien et al., DAFx26, Sec. 3.2.1 and 3.2.3). Applied to the network
+        output on the grid only: the direct sound and parallel early
+        reflections are not filtered, and the decay is unchanged.
+
+        Parameters
+        ----------
+        p0_db : float, NDArray or None
+            Scalar, ``(10,)``, ``(Q,)`` or ``(Q, 10)`` on
+            :func:`~src.fdn_components.geq_band_frequencies`. ``None``
+            removes the shaping.
+        """
+        if self.grid_azimuths is None:
+            raise RuntimeError("Call setup() before set_initial_power().")
+        if p0_db is None:
+            self._p0_sos = None
+            return
+        v = np.asarray(p0_db, dtype=float)
+        if not np.all(np.isfinite(v)):
+            raise ValueError("p0_db must be finite.")
+        Q = self.Q
+        if v.ndim == 0:
+            gains = np.full((GEQ_NUM_BANDS, Q), float(v))
+        elif v.shape == (GEQ_NUM_BANDS,):
+            gains = np.tile(v[:, np.newaxis], (1, Q))
+        elif v.shape == (Q,):
+            gains = np.tile(v[np.newaxis, :], (GEQ_NUM_BANDS, 1))
+        elif v.shape == (Q, GEQ_NUM_BANDS):
+            gains = v.T
+        else:
+            raise ValueError(
+                f"p0_db must be scalar, ({GEQ_NUM_BANDS},), (Q={Q},) or "
+                f"(Q={Q}, {GEQ_NUM_BANDS}), got shape {v.shape}."
+            )
+        #|H|^2 = P, so the magnitude target in dB is the power gain in dB
+        self._p0_sos = np.asarray(gain_to_geq(gains, self.sample_rate))
+
+    def match_late_level(
+        self,
+        target_energy: NDArray,
+        bands: NDArray,
+        *,
+        window_start_s: float,
+        length_s: float,
+        iterations: int = 3,
+    ) -> NDArray:
+        """Match the late W-channel energy per octave band to a reference.
+
+        Synthetic counterpart of the hybrid-reverb transition filter of
+        Carpentier, Noisternig and Warusfel (DAFx 2014, Eq. 3): the reference
+        is the energy from *window_start_s* to the end of a *length_s* render
+        rather than the EDR at t_mix. The tail is rendered alone (no direct
+        sound, no reflections) *iterations* times, refining one isotropic
+        per-band correction applied through :meth:`set_initial_power`; any
+        shaping set before is replaced.
+
+        Parameters
+        ----------
+        target_energy : NDArray, shape (B,)
+            Reference late energy per band, in the network's level convention
+            (``direct_gain=1`` is a unit direct sound in W). Converting a
+            measured or simulated reference into it is the caller's job.
+        bands : NDArray, shape (B,)
+            Consecutive octave centres from
+            :func:`~src.fdn_components.geq_band_frequencies`.
+        window_start_s : float
+            Window start, relative to the render's first sample.
+        length_s : float
+            Render length; the same as the reference's.
+        iterations : int
+            Measure-and-correct passes (3 brings jagged targets within 0.3 dB).
+
+        Returns
+        -------
+        NDArray, shape (B,)
+            Applied correction in dB.
+        """
+        #local import: src.analysis imports src
+
+        if self._early_reflections is not None and self._er_injected:
+            raise ValueError(
+                "The injected early reflections recirculate with the tail; call "
+                "set_early_reflections(..., injected=False) before matching."
+            )
+        bands = np.asarray(bands, dtype=float)
+        command = geq_band_frequencies()
+        if not np.all(np.isin(bands, command)):
+            raise ValueError(
+                "bands must be consecutive octave centres from geq_band_frequencies()."
+            )
+        target = np.asarray(target_energy, dtype=float)
+        if target.shape != bands.shape or not np.all(np.isfinite(target) & (target > 0.0)):
+            raise ValueError(
+                f"target_energy must be finite, positive and shape {bands.shape}, "
+                f"one value per band; got shape {target.shape}."
+            )
+        correction = np.zeros(bands.size)
+        for _ in range(iterations):
+            self.set_initial_power(
+                np.interp(np.log2(command), np.log2(bands), correction)
+            )
+            w = self.render(0.0, 0.0, length_s, direct_gain=0.0, er_gain=0.0)[0]
+            measured = band_energy(w, self.sample_rate, bands, window_start_s)[:, 0]
+            if not np.all(measured > 0.0):
+                self._p0_sos = None
+                raise ValueError(
+                    "The tail has no energy in the window in some band: "
+                    f"window_start_s={window_start_s} against length_s={length_s}."
+                )
+            correction = correction - 10.0 * np.log10(measured / target)
+        self.set_initial_power(np.interp(np.log2(command), np.log2(bands), correction))
+        if np.max(np.abs(correction)) > 40.0:
+            warnings.warn(
+                f"match_late_level applied up to {np.max(np.abs(correction)):.0f} dB: "
+                "the target is probably in another level convention than this "
+                "network's (direct_gain=1 is a unit direct sound in W).",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+        return correction
 
     # ==================================================================
     # Output encoding (Eq. 13)
@@ -471,6 +640,13 @@ class PlaneWaveDFDN:
             self.grid_azimuths, self.grid_elevations, self.output_sh_order
         )
         self._encoding_matrix = Y.T  # ((L_out+1)^2, Q)
+
+    @property
+    def encoding_matrix(self) -> NDArray:
+        """Grid-to-Ambisonics encoder E (Eq. 13), shape ((L_out+1)^2, Q)."""
+        if self._encoding_matrix is None:
+            raise RuntimeError("Call setup() before reading encoding_matrix.")
+        return self._encoding_matrix
 
     # ==================================================================
     # Kronecker feedback
@@ -570,7 +746,7 @@ class PlaneWaveDFDN:
         else:
             scale = np.sqrt(N * float(np.sum(weights**2)))
             b = np.tile(weights / scale, N).reshape(N, Q)
-        if self._early_reflections is not None:
+        if self._early_reflections is not None and self._er_injected:
             b = b.copy()
             b[self._lambda_group] = 0.0
         return b.reshape(N * Q, 1)
@@ -667,7 +843,7 @@ class PlaneWaveDFDN:
         num_samples = int(length_seconds * self.sample_rate)
 
         impulse = np.zeros((1, num_samples))
-        impulse[0, 0] = 1.0
+        impulse[0, :1] = 1.0
 
         return self.process(
             impulse, source_azimuth, source_elevation,
@@ -685,7 +861,7 @@ class PlaneWaveDFDN:
         reverb_gain: float = 1.0,
         grid_output: bool = False,
     ) -> NDArray:
-        """Process mono input through the plane-wave DFDN.
+        """Process mono input through the network.
 
         Signal flow (Fig. 1, Eqs. 11–12 of ICASSP 2020):
 
@@ -714,6 +890,20 @@ class PlaneWaveDFDN:
         self._check_ready()
         if input_data.shape[0] != 1:
             raise ValueError("Input must be mono (1 channel).")
+        if input_data.shape[-1] == 0:
+            return np.zeros((self.Q if grid_output else self.num_outputs, 0))
+        parallel_er = self._early_reflections is not None and not self._er_injected
+        injected_er = self._early_reflections is not None and self._er_injected
+        if self._p0_sos is not None and injected_er:
+            raise ValueError(
+                "Initial-power shaping would also filter the injected early "
+                "reflections; call set_early_reflections(..., injected=False)."
+            )
+        if self._p0_sos is not None or parallel_er:
+            return self._process_parallel(
+                input_data, source_azimuth, source_elevation,
+                direct_gain, er_gain, reverb_gain, grid_output,
+            )
 
         Q = self.Q
         ir_len = input_data.shape[-1]
@@ -751,6 +941,47 @@ class PlaneWaveDFDN:
         x = np.asarray(input_data, dtype=float)
         return graph.process_signal(x.T).T
 
+    def _process_parallel(
+        self,
+        input_data: NDArray,
+        source_azimuth: float,
+        source_elevation: float,
+        direct_gain: float,
+        er_gain: float,
+        reverb_gain: float,
+        grid_output: bool,
+    ) -> NDArray:
+        """Network on the grid, P0 shaping, then direct sound and reflections.
+
+        Alary and Valimaki (I3DA 2021, Sec. III B): the early part runs beside
+        the recursion. The network is rendered with no direct term so that the
+        per-direction filters touch the late field alone.
+        """
+        Q = self.Q
+        x = np.asarray(input_data, dtype=float)
+        b = self._build_input_gains() * float(reverb_gain)
+        c = self._build_output_gains()
+        A = self._kronecker_matrix
+        if self.absorption_gains is not None:
+            A = A * self.absorption_gains
+            c = c * self.absorption_gains
+        graph = pyFDN.dss_to_td(
+            self.delay_length_samps, A, b, c, np.zeros((Q, 1)),
+            post_delay=self.absorption_sos,
+        )
+        grid = graph.process_signal(x.T).T
+        if self._p0_sos is not None:
+            grid = np.stack([
+                sosfilt(np.ascontiguousarray(self._p0_sos[:, :, q]), grid[q])
+                for q in range(Q)
+            ])
+        grid = grid + (
+            self._build_direct_gain(source_azimuth, source_elevation) * float(direct_gain)
+        ) @ x
+        if self._early_reflections is not None:
+            grid = grid + self._build_er_grid_signal(x, x.shape[-1], er_gain)
+        return grid if grid_output else self._encoding_matrix @ grid
+
     # ==================================================================
     # Early reflections buffer
     # ==================================================================
@@ -758,7 +989,7 @@ class PlaneWaveDFDN:
     def _build_er_grid_signal(
         self, input_data: NDArray, ir_len: int, er_gain: float = 1.0,
     ) -> NDArray:
-        """Early-reflection signal on the plane-wave grid, per Eqs. 4-5.
+        """Early-reflection signal on the grid, per Eqs. 4-5.
 
         Each reflection is panned onto the grid with VBAP and delayed by its
         own ``l_r``::
