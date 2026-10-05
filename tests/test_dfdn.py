@@ -6,20 +6,20 @@ import numpy as np
 import pyFDN
 import pytest
 
-from src.fdn.dfdn_2019 import DFDN2019
-from src.fdn.directional_fdn import DirectionalFDN
-from src.fdn.fdn_components import (
+from src.dfdn_2019 import DFDN2019
+from src.directional_fdn import DirectionalFDN
+from src.fdn_components import (
     FeedbackMatrix,
     FeedbackMatrixType,
     generate_distinct_delay_lengths,
     geq_band_frequencies,
 )
-from src.fdn.room import Reflection
-from src.fdn.spatial import (
+from src.room import Reflection
+from src.spatial import (
     encode_directions,
     uniform_directions,
 )
-from src.fdn.transform import DirectionalWeighting
+from src.transform import DirectionalWeighting
 from src.utils import db2lin, lin2db, ms_to_samps
 
 # ======================================================================
@@ -559,7 +559,7 @@ class TestAirAbsorptionAccounting:
         model an unreachable target is not an error to report, it is simply
         pulled down toward what the medium allows.
         """
-        from src.fdn.air import Atmosphere
+        from src.air import Atmosphere
 
         t60 = self.t60_ms.copy()
         t60[-1] = 5000.0

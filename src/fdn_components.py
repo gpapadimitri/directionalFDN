@@ -27,7 +27,7 @@ Absorption
 ----------
 Graphic-EQ absorption (Schlecht and Habets, DAFx 2017).
 :func:`pyFDN.decay_to_geq` already takes one T60 curve per delay line -- what
-:class:`~src.fdn.directional_fdn.DirectionalFDN` needs, one per direction.
+:class:`~src.directional_fdn.DirectionalFDN` needs, one per direction.
 :func:`design_absorption_sos`
 adds the ``(N, 10)`` row-per-line orientation used throughout the package and
 refuses a target on any other frequency axis.
@@ -58,7 +58,7 @@ from numpy.typing import NDArray
 from pyFDN import sample_delay_lengths
 from pyFDN.eq import COMMAND_FREQUENCIES, decay_to_geq
 
-from ..utils import ms_to_samps
+from .utils import ms_to_samps
 
 # ---------------------------------------------------------------------------
 # Delay lengths

@@ -17,7 +17,7 @@ import numpy as np
 import pyfar
 from numpy.typing import NDArray
 
-from ..utils import db2lin
+from .utils import db2lin
 
 SPEED_OF_SOUND = 343.0
 

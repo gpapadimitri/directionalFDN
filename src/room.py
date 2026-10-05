@@ -201,7 +201,7 @@ def shoebox_reflections(
         wall loss.
     air_absorption : bool or Atmosphere
         Apply ISO 9613-1 atmospheric loss over each reflection's own path
-        length: ``True`` for the default :class:`~src.fdn.air.Atmosphere`, or an
+        length: ``True`` for the default :class:`~src.air.Atmosphere`, or an
         instance for other conditions. Only meaningful per band, so it is
         ignored without *freqs*. Default ``False``.
 

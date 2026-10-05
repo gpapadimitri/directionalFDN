@@ -3,7 +3,7 @@
 Implementation of Alary, B., Politis, A., Schlecht, S. J., and Valimaki, V.,
 *"Directional Feedback Delay Network"*, J. Audio Eng. Soc., 67(10), 752-762,
 2019. Kept for comparison only: the package's working reverberator is
-:class:`~src.fdn.directional_fdn.DirectionalFDN` (ICASSP 2020), which replaces
+:class:`~src.directional_fdn.DirectionalFDN` (ICASSP 2020), which replaces
 the spherical-harmonic state and its directional weighting matrix with one
 channel per incident direction on a spatial grid.
 
@@ -19,7 +19,7 @@ Architecture
 
 Usage
 -----
->>> from src.fdn.dfdn_2019 import DFDN2019
+>>> from src.dfdn_2019 import DFDN2019
 >>> dfdn = DFDN2019(
 ...     sample_rate=48000,
 ...     num_delay_line_groups=4,
@@ -50,7 +50,7 @@ from .transform import DirectionalWeighting
 class DFDN2019:
     """Directional Feedback Delay Network, spherical-harmonic domain (Alary et al. 2019).
 
-    Archival; see :class:`~src.fdn.directional_fdn.DirectionalFDN`.
+    Archival; see :class:`~src.directional_fdn.DirectionalFDN`.
 
     A :class:`pyFDN.FDNBuild` with:
 
@@ -114,7 +114,7 @@ class DFDN2019:
         des_t60_ms : float or NDArray
             Desired T60 (ms).  Scalar → homogeneous; a ``(10,)`` array →
             frequency-dependent, on the graphic EQ's own grid (see
-            :func:`~src.fdn.fdn_components.geq_band_frequencies`).
+            :func:`~src.fdn_components.geq_band_frequencies`).
         feedback_type : FeedbackMatrixType
             Type of base N×N feedback matrix.
         rng : np.random.Generator, optional
@@ -145,7 +145,7 @@ class DFDN2019:
         des_t60_ms : float or NDArray
             Broadband (scalar) **or** frequency-dependent T60 in ms.  An array
             is specified on the graphic EQ's own ten-point grid; see
-            :func:`~src.fdn.fdn_components.geq_band_frequencies`.
+            :func:`~src.fdn_components.geq_band_frequencies`.
         """
         if self.delay_length_samps is None:
             raise RuntimeError("Call setup() before init_absorption().")
@@ -327,7 +327,7 @@ class DFDN2019:
         delay length (Sec. 2.2), so its absorption is one filter times I_Q and
         commutes with T_j -- verified identical to 0.0 across a group's
         channels.  It would *not* commute in a formulation with per-channel
-        delays, which is why :class:`~src.fdn.directional_fdn.DirectionalFDN` has no
+        delays, which is why :class:`~src.directional_fdn.DirectionalFDN` has no
         transform to fold.
         """
         if self.transform is None:

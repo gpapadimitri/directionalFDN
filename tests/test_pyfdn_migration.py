@@ -5,7 +5,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from src.fdn.fdn_components import generate_delay_lengths, geq_band_frequencies
+from src.fdn_components import generate_delay_lengths, geq_band_frequencies
 
 
 class TestDelayLengths:
@@ -48,7 +48,7 @@ class TestAbsorptionDesign:
     DELAYS = np.array([1039, 1213, 1381, 1523])
 
     def test_grid_is_the_designs_own(self):
-        from src.fdn.fdn_components import (
+        from src.fdn_components import (
             GEQ_NUM_BANDS,
             geq_band_frequencies,
         )
@@ -61,7 +61,7 @@ class TestAbsorptionDesign:
         )
 
     def test_shape_and_layout(self):
-        from src.fdn.fdn_components import design_absorption_sos
+        from src.fdn_components import design_absorption_sos
 
         sos = design_absorption_sos(self.T60_S, self.DELAYS, self.FS)
         assert sos.shape == (11, 6, 4)
@@ -71,7 +71,7 @@ class TestAbsorptionDesign:
         """Rows of an (N, 10) target map to pyFDN's (10, N) columns."""
         import pyFDN
 
-        from src.fdn.fdn_components import design_absorption_sos
+        from src.fdn_components import design_absorption_sos
 
         expected = pyFDN.decay_to_geq(self.T60_S, self.DELAYS, self.FS)
         actual = design_absorption_sos(self.T60_S, self.DELAYS, self.FS)
@@ -87,7 +87,7 @@ class TestAbsorptionDesign:
             )
 
     def test_per_channel_rt_gives_different_filters(self):
-        from src.fdn.fdn_components import design_absorption_sos
+        from src.fdn_components import design_absorption_sos
 
         t60 = np.vstack([self.T60_S, self.T60_S * 0.5, self.T60_S, self.T60_S * 2.0])
         sos = design_absorption_sos(t60, self.DELAYS, self.FS)
@@ -95,7 +95,7 @@ class TestAbsorptionDesign:
         assert not np.allclose(sos[:, :, 0], sos[:, :, 1])
 
     def test_rejects_wrong_channel_count(self):
-        from src.fdn.fdn_components import design_absorption_sos
+        from src.fdn_components import design_absorption_sos
 
         t60 = np.vstack([self.T60_S, self.T60_S])  # 2 rows for 4 delays
         with pytest.raises(ValueError, match="one T60 curve per delay line"):
@@ -107,7 +107,7 @@ class TestAbsorptionDesign:
         Silently accepting eight values and stretching them onto the grid
         would misplace every one of them.
         """
-        from src.fdn.fdn_components import design_absorption_sos
+        from src.fdn_components import design_absorption_sos
 
         eight_bands = np.array([0.9, 1.0, 1.1, 1.0, 0.8, 0.7, 0.6, 0.5])
         with pytest.raises(ValueError, match="10 values per delay line"):
@@ -117,7 +117,7 @@ class TestAbsorptionDesign:
         """Each command value is realised at its own frequency, 16 kHz included."""
         from scipy.signal import sosfreqz
 
-        from src.fdn.fdn_components import design_absorption_sos
+        from src.fdn_components import design_absorption_sos
 
         m = 1500.0
         t60 = np.array([1.8, 1.8, 1.7, 1.6, 1.4, 1.2, 1.0, 0.7, 0.45, 0.3])
@@ -159,7 +159,7 @@ class TestPlainFDNOnPyFDN:
         np.testing.assert_allclose(rt[1:], 1.5, rtol=0.05)
 
     def test_frequency_dependent_t60_is_accurate(self, measured_t60):
-        from src.fdn.fdn_components import design_absorption_sos
+        from src.fdn_components import design_absorption_sos
 
         t60_s = np.array([1.8, 1.8, 1.7, 1.6, 1.4, 1.2, 1.0, 0.7, 0.45, 0.1])
         sos = design_absorption_sos(t60_s, self.DELAYS, self.FS)
@@ -174,7 +174,7 @@ class TestDFDN2019CorrectedLoop:
     FS = 48000.0
 
     def _make(self, **kwargs):
-        from src.fdn.dfdn_2019 import DFDN2019
+        from src.dfdn_2019 import DFDN2019
 
         dfdn = DFDN2019(self.FS, 8, ambisonics_order=1, seed=42,
                               **kwargs)
@@ -190,7 +190,7 @@ class TestDFDN2019CorrectedLoop:
     def test_effective_matrix_folds_transform(self):
         from scipy.linalg import block_diag
 
-        from src.fdn.spatial import uniform_directions
+        from src.spatial import uniform_directions
 
         dfdn = self._make()
         az, el = uniform_directions(24)
@@ -243,7 +243,7 @@ class TestDirectionalFDNCorrectedLoop:
     FS = 48000.0
 
     def _make(self, **setup_kwargs):
-        from src.fdn.directional_fdn import DirectionalFDN
+        from src.directional_fdn import DirectionalFDN
 
         pw = DirectionalFDN(self.FS, 8, sh_order=1, seed=42)
         kwargs = dict(delay_range_ms=(20.0, 60.0), t60_per_direction_ms=1500.0)
@@ -308,7 +308,7 @@ class TestDirectionalFDNCorrectedLoop:
         assert rir[0, 0] == pytest.approx(0.5, rel=1e-6)
 
     def test_early_reflections_arrive_on_time(self):
-        from src.fdn.room import Reflection
+        from src.room import Reflection
 
         pw = self._make()
         pw.set_early_reflections(
@@ -319,7 +319,7 @@ class TestDirectionalFDNCorrectedLoop:
         assert np.abs(rir[0, 200]) > 1e-3
 
     def test_early_reflections_add_energy(self):
-        from src.fdn.room import Reflection
+        from src.room import Reflection
 
         without = self._make().render(0.0, 0.0, length_seconds=1.0)
         pw = self._make()
@@ -369,14 +369,14 @@ class TestAirAbsorption:
     )
     def test_rejects_unphysical_atmospheres(self, kwargs, match):
         """Out-of-range inputs returned plausible numbers rather than failing."""
-        from src.fdn.air import Atmosphere
+        from src.air import Atmosphere
 
         with pytest.raises(ValueError, match=match):
             Atmosphere(**kwargs)
 
     def test_rejects_negative_frequencies(self):
         """alpha goes as f^2, so a sign error would pass silently."""
-        from src.fdn.air import Atmosphere
+        from src.air import Atmosphere
 
         with pytest.raises(ValueError, match="[Ff]requenc"):
             Atmosphere().alpha_db_per_m(np.array([-1000.0]))
@@ -389,7 +389,7 @@ class TestAirAbsorption:
         """
         import warnings
 
-        from src.fdn.air import Atmosphere
+        from src.air import Atmosphere
 
         with warnings.catch_warnings():
             warnings.simplefilter("error")
@@ -398,7 +398,7 @@ class TestAirAbsorption:
         assert np.isfinite(t60[1])
 
     def test_air_only_t60_falls_with_frequency(self):
-        from src.fdn.air import Atmosphere
+        from src.air import Atmosphere
 
         t_air = Atmosphere().t60(self.FREQS)
         assert np.all(np.diff(t_air) < 0.0)
@@ -407,7 +407,7 @@ class TestAirAbsorption:
 
     def test_air_limited_target_matches_the_sabine_4mv_term(self):
         """The rate sum must equal the textbook air term, not merely resemble it."""
-        from src.fdn.air import Atmosphere
+        from src.air import Atmosphere
 
         volume, surface, alpha_boundary = 320.0, 304.0, 0.1857
         sabine_dry = 0.161 * volume / (surface * alpha_boundary)
@@ -418,7 +418,7 @@ class TestAirAbsorption:
         np.testing.assert_allclose(combined, sabine_with_air, rtol=1e-3)
 
     def test_air_can_only_shorten(self):
-        from src.fdn.air import Atmosphere
+        from src.air import Atmosphere
 
         limited = Atmosphere().limit(self.T60, self.FREQS)
         assert np.all(limited <= self.T60)
@@ -427,7 +427,7 @@ class TestAirAbsorption:
 
     def test_shares_sum_to_the_required_attenuation(self):
         """air_db and boundary_db must account for the realised round trip."""
-        from src.fdn.air import Atmosphere
+        from src.air import Atmosphere
 
         t60 = np.tile(self.T60, (4, 1))
         budget = Atmosphere().budget(t60, self.FREQS, self.DELAYS, self.FS)
@@ -438,7 +438,7 @@ class TestAirAbsorption:
 
     def test_both_shares_are_positive(self):
         """The old model could produce a negative boundary share; this cannot."""
-        from src.fdn.air import Atmosphere
+        from src.air import Atmosphere
 
         t60 = np.tile(np.full(self.FREQS.size, 60.0), (4, 1))  # absurd target
         budget = Atmosphere().budget(t60, self.FREQS, self.DELAYS, self.FS)
@@ -448,7 +448,7 @@ class TestAirAbsorption:
 
     def test_enabling_air_shortens_the_decay(self):
         """The point of the change: the flag must now affect the sound."""
-        from src.fdn.directional_fdn import DirectionalFDN
+        from src.directional_fdn import DirectionalFDN
 
         rt = {}
         for air in (False, True):
@@ -469,7 +469,7 @@ class TestAirAbsorption:
         assert rt[True][low] == pytest.approx(rt[False][low], rel=0.05)
 
     def test_attributes_exposed_on_the_class(self):
-        from src.fdn.directional_fdn import DirectionalFDN
+        from src.directional_fdn import DirectionalFDN
 
         pw = DirectionalFDN(self.FS, 8, sh_order=1, seed=42)
         pw.setup(
@@ -491,7 +491,7 @@ class TestFeedbackMatrixFromPyFDN:
         """The gallery's Hadamard must be bit-identical to the old one."""
         import pyFDN
 
-        from src.fdn.fdn_components import FeedbackMatrix, FeedbackMatrixType
+        from src.fdn_components import FeedbackMatrix, FeedbackMatrixType
 
         fb = FeedbackMatrix(8, FeedbackMatrixType.HADAMARD)
         np.testing.assert_allclose(
@@ -502,7 +502,7 @@ class TestFeedbackMatrixFromPyFDN:
         """fdn_matrix_gallery randomises Householder; we want the all-ones one."""
         import pyFDN
 
-        from src.fdn.fdn_components import FeedbackMatrix, FeedbackMatrixType
+        from src.fdn_components import FeedbackMatrix, FeedbackMatrixType
 
         fb = FeedbackMatrix(8, FeedbackMatrixType.HOUSEHOLDER)
         np.testing.assert_allclose(
@@ -510,7 +510,7 @@ class TestFeedbackMatrixFromPyFDN:
         )
 
     def test_random_is_reproducible(self):
-        from src.fdn.fdn_components import FeedbackMatrix, FeedbackMatrixType
+        from src.fdn_components import FeedbackMatrix, FeedbackMatrixType
 
         a = FeedbackMatrix(8, FeedbackMatrixType.RANDOM, seed=42).matrix
         b = FeedbackMatrix(8, FeedbackMatrixType.RANDOM, seed=42).matrix
@@ -520,7 +520,7 @@ class TestFeedbackMatrixFromPyFDN:
 
     def test_random_does_not_disturb_the_global_stream(self):
         """pyFDN's gallery draws from global np.random; we must restore it."""
-        from src.fdn.fdn_components import FeedbackMatrix, FeedbackMatrixType
+        from src.fdn_components import FeedbackMatrix, FeedbackMatrixType
 
         np.random.seed(0)
         expected = np.random.rand()
@@ -544,20 +544,20 @@ class TestFeedbackMatrixFromPyFDN:
     def test_every_type_builds_and_is_lossless(self, kind):
         import pyFDN
 
-        from src.fdn.fdn_components import FeedbackMatrix, FeedbackMatrixType
+        from src.fdn_components import FeedbackMatrix, FeedbackMatrixType
 
         fb = FeedbackMatrix(8, getattr(FeedbackMatrixType, kind), seed=42)
         assert fb.matrix.shape == (8, 8)
         assert pyFDN.is_unilossless(fb.matrix)
 
     def test_unknown_type_still_raises(self):
-        from src.fdn.fdn_components import FeedbackMatrix
+        from src.fdn_components import FeedbackMatrix
 
         with pytest.raises(ValueError, match="Unsupported feedback matrix type"):
             FeedbackMatrix(8, "not-a-type")
 
     def test_matrix_convolve_is_gone(self):
-        from src.fdn.fdn_components import FeedbackMatrix
+        from src.fdn_components import FeedbackMatrix
 
         assert not hasattr(FeedbackMatrix, "matrix_convolve")
 
@@ -585,7 +585,7 @@ class TestDelayLengthSpread:
     FS = 48000.0
 
     def _make(self, sh_order=3, groups=8):
-        from src.fdn.directional_fdn import DirectionalFDN
+        from src.directional_fdn import DirectionalFDN
 
         pw = DirectionalFDN(self.FS, groups, sh_order=sh_order, seed=42)
         pw.setup(delay_range_ms=(20.0, 60.0), t60_per_direction_ms=1500.0)
@@ -645,7 +645,7 @@ class TestLosslessnessChecks:
     def test_directional_fdn_kronecker_is_lossless(self):
         import pyFDN
 
-        from src.fdn.directional_fdn import DirectionalFDN
+        from src.directional_fdn import DirectionalFDN
 
         pw = DirectionalFDN(self.FS, 4, sh_order=1, seed=42)
         pw.setup(delay_range_ms=(20.0, 60.0), t60_per_direction_ms=1500.0)
@@ -654,7 +654,7 @@ class TestLosslessnessChecks:
     def test_dfdn_2019_kronecker_is_lossless(self):
         import pyFDN
 
-        from src.fdn.dfdn_2019 import DFDN2019
+        from src.dfdn_2019 import DFDN2019
 
         dfdn = DFDN2019(self.FS, 4, ambisonics_order=1, seed=42)
         dfdn.setup(delay_range_ms=(20.0, 60.0), des_t60_ms=1500.0)
@@ -664,7 +664,7 @@ class TestLosslessnessChecks:
         """A kron I_Q is lossless whenever A is (ICASSP 2020, Sec. 3)."""
         import pyFDN
 
-        from src.fdn.directional_fdn import DirectionalFDN
+        from src.directional_fdn import DirectionalFDN
 
         pw = DirectionalFDN(self.FS, 4, sh_order=1, seed=42)
         pw.setup(delay_range_ms=(20.0, 60.0), t60_per_direction_ms=1500.0)
@@ -672,7 +672,7 @@ class TestLosslessnessChecks:
 
     def test_directional_fdn_feedback_never_couples_directions(self):
         """Eq. of Sec. 3: recirculation between different channels is zero."""
-        from src.fdn.directional_fdn import DirectionalFDN
+        from src.directional_fdn import DirectionalFDN
 
         pw = DirectionalFDN(self.FS, 4, sh_order=1, seed=42)
         pw.setup(delay_range_ms=(20.0, 60.0), t60_per_direction_ms=1500.0)
@@ -692,7 +692,7 @@ class TestPoleBounds:
     DELAYS = np.array([1039, 1213, 1381, 1523])
 
     def _sos(self, t60_s):
-        from src.fdn.fdn_components import design_absorption_sos
+        from src.fdn_components import design_absorption_sos
 
         return design_absorption_sos(t60_s, self.DELAYS, self.FS)
 
@@ -796,7 +796,7 @@ class TestHigherOrderReflections:
     T60 = np.array([0.9, 1.0, 1.1, 1.0, 0.8, 0.7, 0.6, 0.5])
 
     def _refl(self, **kw):
-        from src.fdn.room import shoebox_reflections
+        from src.room import shoebox_reflections
 
         args = dict(room=self.ROOM, source=self.SRC, receiver=self.REC,
                     sample_rate=self.FS, t60_broadband_s=0.825)
@@ -858,7 +858,7 @@ class TestHigherOrderReflections:
 
     def test_band_gains_render_as_a_filtered_arrival(self):
         """With band gains a reflection is a short impulse response, not a spike."""
-        from src.fdn.directional_fdn import DirectionalFDN
+        from src.directional_fdn import DirectionalFDN
 
         pw = DirectionalFDN(self.FS, 4, sh_order=1, seed=42)
         pw.setup(delay_range_ms=(20.0, 60.0), t60_per_direction_ms=1000.0)
@@ -873,7 +873,7 @@ class TestHigherOrderReflections:
         assert np.count_nonzero(np.abs(window) > 1e-6) > 1
 
     def test_higher_order_fills_the_early_window(self):
-        from src.fdn.directional_fdn import DirectionalFDN
+        from src.directional_fdn import DirectionalFDN
 
         energy = {}
         for order in (1, 3):
@@ -897,12 +897,12 @@ class TestVBAP:
     """
 
     def _grid(self, sh_order=2):
-        from src.fdn import spatial
+        from src import spatial
 
         return spatial.quadrature_grid(sh_order)
 
     def test_gains_are_nonnegative_and_sum_to_one(self):
-        from src.fdn.spatial import vbap_gains
+        from src.spatial import vbap_gains
 
         az, el = self._grid()
         for direction in [(0.0, 0.0), (1.3, 0.4), (-2.0, -0.8), (np.pi, 0.0)]:
@@ -911,14 +911,14 @@ class TestVBAP:
             assert g.sum() == pytest.approx(1.0)
 
     def test_at_most_three_active_gains(self):
-        from src.fdn.spatial import vbap_gains
+        from src.spatial import vbap_gains
 
         az, el = self._grid()
         g = vbap_gains(az, el, 0.9, 0.2)
         assert np.count_nonzero(g > 1e-9) <= 3
 
     def test_a_grid_direction_pans_to_itself(self):
-        from src.fdn.spatial import vbap_gains
+        from src.spatial import vbap_gains
 
         az, el = self._grid()
         g = vbap_gains(az, el, float(az[5]), float(el[5]))
@@ -926,7 +926,7 @@ class TestVBAP:
 
     def test_encoding_recovers_the_direction(self):
         """E @ vbap(theta) must approximate y(theta) -- the paper's premise."""
-        from src.fdn import spatial
+        from src import spatial
 
         az, el = self._grid(sh_order=3)
         Y = spatial.encode_directions(az, el, 1)          # E = Y^T per Eq. 13
@@ -941,7 +941,7 @@ class TestVBAP:
             np.testing.assert_allclose(encoded[1:], target[1:], atol=0.22)
 
     def test_rejects_a_degenerate_grid(self):
-        from src.fdn.spatial import vbap_gains
+        from src.spatial import vbap_gains
 
         with pytest.raises(ValueError, match="at least 4"):
             vbap_gains(np.array([0.0, 1.0]), np.array([0.0, 0.0]), 0.0, 0.0)
@@ -959,7 +959,7 @@ class TestDFDN2019CarriesNoExtraKnobs:
     FS = 48000.0
 
     def _dfdn(self):
-        from src.fdn.dfdn_2019 import DFDN2019
+        from src.dfdn_2019 import DFDN2019
 
         dfdn = DFDN2019(self.FS, 4, ambisonics_order=1,
                               seed=42)
@@ -967,7 +967,7 @@ class TestDFDN2019CarriesNoExtraKnobs:
         return dfdn
 
     def test_constructor_takes_no_scattering_amount(self):
-        from src.fdn.dfdn_2019 import DFDN2019
+        from src.dfdn_2019 import DFDN2019
 
         with pytest.raises(TypeError, match="scattering_amount"):
             DFDN2019(self.FS, 4, ambisonics_order=1,
@@ -1029,7 +1029,7 @@ class TestAmbisonicNormalization:
         [(0.0, 0.0), (0.9, 0.4), (-2.1, -1.1), (np.pi, np.pi / 2)],
     )
     def test_matches_sn3d_across_orders(self, azimuth, elevation):
-        from src.fdn import spatial
+        from src import spatial
 
         for order in (1, 2, 3):
             np.testing.assert_allclose(
@@ -1044,12 +1044,12 @@ class TestAmbisonicNormalization:
     )
     def test_w_is_unity_everywhere(self, azimuth, elevation):
         """The defining property: an omnidirectional source encodes to W = 1."""
-        from src.fdn import spatial
+        from src import spatial
 
         assert spatial.encode_directions(azimuth, elevation, 3)[0] == pytest.approx(1.0)
 
     def test_array_input_agrees_with_scalar_calls(self):
-        from src.fdn import spatial
+        from src import spatial
 
         az = np.array([0.0, 0.9, -2.1])
         el = np.array([0.0, 0.4, -1.1])
@@ -1071,7 +1071,7 @@ class TestQuadratureGrid:
     @pytest.mark.parametrize("order", [1, 2, 3, 4, 5, 6, 7])
     def test_grid_is_the_degree_2L_design(self, order):
         """Not degree 4L: spharpy's n_max already doubles to a degree."""
-        from src.fdn import spatial
+        from src import spatial
 
         azimuths, _ = spatial.quadrature_grid(order)
         assert len(azimuths) == self._design_size(2 * order)
@@ -1079,7 +1079,7 @@ class TestQuadratureGrid:
     @pytest.mark.parametrize("order", [1, 2, 3, 5, 7])
     def test_grid_satisfies_sn3d_orthogonality(self, order):
         """Y^T Y (4 pi / Q) = diag(4 pi / (2l + 1)) -- what the degree is for."""
-        from src.fdn import spatial
+        from src import spatial
 
         azimuths, elevations = spatial.quadrature_grid(order)
         Y = spatial.encode_directions(azimuths, elevations, order)
@@ -1093,7 +1093,7 @@ class TestQuadratureGrid:
 
     def test_grid_is_large_enough_for_the_order(self, ):
         """Sec. 3: "at least Q >= (L + 1)^2 uniform points"."""
-        from src.fdn import spatial
+        from src import spatial
 
         for order in range(1, 8):
             azimuths, _ = spatial.quadrature_grid(order)
@@ -1113,7 +1113,7 @@ class TestInputDistribution:
     FS = 48000.0
 
     def _make(self):
-        from src.fdn.directional_fdn import DirectionalFDN
+        from src.directional_fdn import DirectionalFDN
 
         pw = DirectionalFDN(self.FS, 4, sh_order=2, output_sh_order=2,
                            seed=42)
@@ -1195,7 +1195,7 @@ class TestLambdaGroupInput:
     FS = 48000.0
 
     def _make(self, lambda_group=0):
-        from src.fdn.directional_fdn import DirectionalFDN
+        from src.directional_fdn import DirectionalFDN
 
         pw = DirectionalFDN(self.FS, 4, sh_order=1, output_sh_order=1,
                            seed=42)
@@ -1204,7 +1204,7 @@ class TestLambdaGroupInput:
         return pw
 
     def _reflection(self):
-        from src.fdn.room import Reflection
+        from src.room import Reflection
 
         return [Reflection(gain=0.5, azimuth=0.3, elevation=0.1,
                            delay_samples=150)]
@@ -1265,7 +1265,7 @@ class TestPaperFaithfulEncoding:
     T60 = np.array([0.9, 1.0, 1.1, 1.0, 0.8, 0.7, 0.6])
 
     def _make(self, sh_order=2, **kw):
-        from src.fdn.directional_fdn import DirectionalFDN
+        from src.directional_fdn import DirectionalFDN
 
         pw = DirectionalFDN(self.FS, 8, sh_order=sh_order, output_sh_order=1,
                            seed=42, **kw)
@@ -1274,7 +1274,7 @@ class TestPaperFaithfulEncoding:
 
     def test_encoder_is_the_plain_sh_matrix(self):
         """Eq. 13: E = Y(L, U_grid), with no quadrature scaling."""
-        from src.fdn import spatial
+        from src import spatial
 
         pw = self._make()
         Y = spatial.encode_directions(
@@ -1283,7 +1283,7 @@ class TestPaperFaithfulEncoding:
         np.testing.assert_allclose(pw._encoding_matrix, Y.T, atol=1e-12)
 
     def test_one_grid_channel_encodes_to_its_own_direction(self):
-        from src.fdn import spatial
+        from src import spatial
 
         pw = self._make()
         q = 5
@@ -1297,7 +1297,7 @@ class TestPaperFaithfulEncoding:
 
     def test_direct_sound_is_panned_onto_the_grid(self):
         """Eq. 3: d = vbap(U_grid, (phi, theta)), then encoded by E."""
-        from src.fdn import spatial
+        from src import spatial
 
         pw = self._make()
         az, el = 0.8, 0.3
@@ -1311,8 +1311,8 @@ class TestPaperFaithfulEncoding:
 
     def test_drr_no_longer_depends_on_grid_size(self):
         """The leak this fixes: sh_order changed DRR by 7.3 dB."""
-        from src.fdn.directional_fdn import DirectionalFDN
-        from src.fdn.room import shoebox_reflections
+        from src.directional_fdn import DirectionalFDN
+        from src.room import shoebox_reflections
 
         room, src, rec = (10.0, 8.0, 4.0), (3.0, 7.0, 1.5), (8.0, 2.0, 1.5)
         dist = float(np.linalg.norm(np.array(src) - np.array(rec)))
@@ -1334,8 +1334,8 @@ class TestPaperFaithfulEncoding:
 
         A reflection alone must therefore come out darker than it went in.
         """
-        from src.fdn.directional_fdn import DirectionalFDN
-        from src.fdn.room import Reflection
+        from src.directional_fdn import DirectionalFDN
+        from src.room import Reflection
 
         pw = DirectionalFDN(self.FS, 8, sh_order=2, output_sh_order=1,
                            seed=42)
@@ -1352,8 +1352,8 @@ class TestPaperFaithfulEncoding:
         assert np.count_nonzero(np.abs(w[400:700]) > 1e-9) > 1   # and is filtered
 
     def test_reflections_still_excite_the_late_field(self):
-        from src.fdn.directional_fdn import DirectionalFDN
-        from src.fdn.room import Reflection
+        from src.directional_fdn import DirectionalFDN
+        from src.room import Reflection
 
         pw = DirectionalFDN(self.FS, 8, sh_order=2, output_sh_order=1,
                            seed=42)
@@ -1384,8 +1384,8 @@ class TestDFDN2019AgainstJAES2019:
         A 1/N factor made the direct sound drop 6 dB per doubling of the
         delay-line group count.
         """
-        from src.fdn.dfdn_2019 import DFDN2019
-        from src.fdn.spatial import encode_directions
+        from src.dfdn_2019 import DFDN2019
+        from src.spatial import encode_directions
 
         expected = encode_directions(0.0, 0.0, 1)[0]
         for groups in (4, 8, 16):
@@ -1401,8 +1401,8 @@ class TestDFDN2019AgainstJAES2019:
         Sampled over a sphere, as the paper specifies -- a ring of constant
         elevation is rank deficient in the SH basis and reports nonsense.
         """
-        from src.fdn import spatial
-        from src.fdn.transform import weighting_effective_order
+        from src import spatial
+        from src.transform import weighting_effective_order
 
         az, el = spatial.uniform_directions(64)
         assert weighting_effective_order(np.ones(64), az, el) == 0
@@ -1415,8 +1415,8 @@ class TestDFDN2019AgainstJAES2019:
 
     def test_transform_does_not_add_energy(self):
         """Sec 2.4: the transform must not inject energy, or the loop grows."""
-        from src.fdn import spatial
-        from src.fdn.transform import DirectionalWeighting
+        from src import spatial
+        from src.transform import DirectionalWeighting
 
         az, el = spatial.uniform_directions(64)
         t60 = np.where(np.cos(az) > 0, 2.0, 0.6) * 1e3
@@ -1431,7 +1431,7 @@ class TestDFDN2019AgainstJAES2019:
         The channels a ring misses are exactly the ones null_complement passes
         through unweighted, so those directions get no decay control at all.
         """
-        from src.fdn.transform import DirectionalWeighting
+        from src.transform import DirectionalWeighting
 
         az = np.linspace(0, 2 * np.pi, 12, endpoint=False)
         el = np.zeros(12)                     # a ring, not a sphere
@@ -1443,8 +1443,8 @@ class TestDFDN2019AgainstJAES2019:
     def test_a_spherical_sampling_does_not_warn(self):
         import warnings as _warnings
 
-        from src.fdn import spatial
-        from src.fdn.transform import DirectionalWeighting
+        from src import spatial
+        from src.transform import DirectionalWeighting
 
         az, el = spatial.uniform_directions(64)
         t60 = np.where(np.cos(az) > 0, 2.0, 0.6) * 1e3
@@ -1457,8 +1457,8 @@ class TestDFDN2019AgainstJAES2019:
         """Fig. 3: the realised directional decay tracks the target."""
         import pyFDN
 
-        from src.fdn import spatial
-        from src.fdn.dfdn_2019 import DFDN2019
+        from src import spatial
+        from src.dfdn_2019 import DFDN2019
 
         order = 2
         # Sec 3.1 samples T60 "using a uniform set of points on a sphere, such
@@ -1552,7 +1552,7 @@ class TestGridOutput:
     FS = 48000.0
 
     def _dfdn(self):
-        from src.fdn.directional_fdn import DirectionalFDN
+        from src.directional_fdn import DirectionalFDN
 
         pw = DirectionalFDN(self.FS, 4, sh_order=1, output_sh_order=1,
                            seed=42)
@@ -1576,7 +1576,7 @@ class TestGridOutput:
         """Without the encoder, each grid channel keeps its own T60."""
         import pyFDN
 
-        from src.fdn.directional_fdn import DirectionalFDN
+        from src.directional_fdn import DirectionalFDN
 
         pw = DirectionalFDN(self.FS, 8, sh_order=1, output_sh_order=1,
                            seed=42)

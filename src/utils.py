@@ -31,7 +31,7 @@ ms_to_samps = pyFDN.ms_to_smp
 #: sparsity of the network rather than by the absorption design.
 #:
 #: These are the top eight points of the graphic EQ's design grid (see
-#: :func:`~src.fdn.fdn_components.geq_band_frequencies`), so a measurement
+#: :func:`~src.fdn_components.geq_band_frequencies`), so a measurement
 #: lines up with a ten-value target index for index as ``target[2:]``.
 OCTAVE_BANDS = np.array(
     [125, 250, 500, 1000, 2000, 4000, 8000, 16000], dtype=float
@@ -235,7 +235,7 @@ def energy_decay_deviation(directional_irs: NDArray) -> NDArray:
         One impulse response per direction, already decomposed.  Beamforming
         is the caller's, since the beam pattern sets how much of the true
         deviation survives the analysis (Alary et al. 2021, Sec. II A) --
-        pass :meth:`~src.fdn.directional_fdn.DirectionalFDN.render`'s
+        pass :meth:`~src.directional_fdn.DirectionalFDN.render`'s
         ``grid_output`` to leave it out of the measurement entirely.
 
     Returns
@@ -261,7 +261,7 @@ def energy_decay_deviation(directional_irs: NDArray) -> NDArray:
 
 #: Bounds on the FDN loop's pole magnitudes against frequency.  Takes the
 #: absorption as the ``(n_sections, 6, N)`` bank of
-#: :func:`src.fdn.fdn_components.design_absorption_sos` and works from the
+#: :func:`src.fdn_components.design_absorption_sos` and works from the
 #: cascade, not a flattened transfer function.
 pole_bounds = pyFDN.pole_boundaries
 

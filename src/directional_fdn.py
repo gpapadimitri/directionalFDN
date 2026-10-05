@@ -6,7 +6,7 @@ delay-line groups where each channel corresponds to an incident direction on a
 spatial grid of Q directions" (Sec. 3). This is the package's working
 reverberator. The spherical-harmonic formulation it replaces (Alary et al.,
 J. Audio Eng. Soc. 67(10), 2019) is kept for comparison as
-:class:`~src.fdn.dfdn_2019.DFDN2019`.
+:class:`~src.dfdn_2019.DFDN2019`.
 
 Architecture
 ------------
@@ -39,7 +39,7 @@ plane waves.
 
 Usage
 -----
->>> from src.fdn.directional_fdn import DirectionalFDN
+>>> from src.directional_fdn import DirectionalFDN
 >>> pw = DirectionalFDN(
 ...     sample_rate=48000,
 ...     num_delay_line_groups=8,
@@ -51,7 +51,7 @@ Usage
 ... )
 
 The frequency axis is the graphic EQ's own design grid; build targets against
-:func:`~src.fdn.fdn_components.geq_band_frequencies`.
+:func:`~src.fdn_components.geq_band_frequencies`.
 >>> rir = pw.render(source_azimuth=0.0, source_elevation=0.0,
 ...                  length_seconds=1.0)
 """
@@ -67,9 +67,9 @@ from pyFDN.eq import gain_to_geq
 from pyFDN.td import SOSBank
 from scipy.signal import sosfilt
 
-from ..utils import db2lin
 from . import spatial
 from .air import AirBudget, Atmosphere
+from .analysis import band_energy
 from .fdn_components import (
     GEQ_NUM_BANDS,
     FeedbackMatrix,
@@ -79,6 +79,7 @@ from .fdn_components import (
     geq_band_frequencies,
 )
 from .room import Reflection
+from .utils import db2lin
 
 # ---------------------------------------------------------------------------
 # Early Reflection Module (Eqs. 3–5)
@@ -333,7 +334,7 @@ class DirectionalFDN:
               Row *q* gives the T60 for grid direction *q*.
 
             The ten frequency values are read at
-            :func:`~src.fdn.fdn_components.geq_band_frequencies`, the grid
+            :func:`~src.fdn_components.geq_band_frequencies`, the grid
             the graphic EQ designs on: octave centres 31.25 Hz to 16 kHz,
             interpolated linearly in hertz between them and held beyond.
         feedback_type : FeedbackMatrixType
@@ -341,7 +342,7 @@ class DirectionalFDN:
         air_absorption : bool or Atmosphere, optional
             Treat *t60_per_direction_ms* as the **boundary-only** target and
             add atmospheric absorption (ISO 9613-1) on top of it: ``True`` for
-            the default :class:`~src.fdn.air.Atmosphere`, or an instance for
+            the default :class:`~src.air.Atmosphere`, or an instance for
             other conditions.  The realised decay is
             ``1/T = 1/T_boundary + 1/T_air`` -- the ``4mV`` term of Sabine and
             Eyring.  The realised T60 is therefore shorter than requested,
@@ -423,7 +424,7 @@ class DirectionalFDN:
                 f"t60_per_direction_ms must be scalar, ({GEQ_NUM_BANDS},), "
                 f"(Q={Q},), or (Q={Q}, {GEQ_NUM_BANDS}), got shape "
                 f"{t60.shape}. The frequency axis is the GEQ design grid; see "
-                "src.fdn.fdn_components.geq_band_frequencies."
+                "src.fdn_components.geq_band_frequencies."
             )
         # Branch on the shape actually computed above: a (Q,) T60 is
         # broadband-per-channel and must take the scalar-gain path.
@@ -505,7 +506,7 @@ class DirectionalFDN:
         ----------
         p0_db : float, NDArray or None
             Scalar, ``(10,)``, ``(Q,)`` or ``(Q, 10)`` on
-            :func:`~src.fdn.fdn_components.geq_band_frequencies`. ``None``
+            :func:`~src.fdn_components.geq_band_frequencies`. ``None``
             removes the shaping.
         """
         if self.grid_azimuths is None:
@@ -560,7 +561,7 @@ class DirectionalFDN:
             measured or simulated reference into it is the caller's job.
         bands : NDArray, shape (B,)
             Consecutive octave centres from
-            :func:`~src.fdn.fdn_components.geq_band_frequencies`.
+            :func:`~src.fdn_components.geq_band_frequencies`.
         window_start_s : float
             Window start, relative to the render's first sample.
         length_s : float
@@ -573,8 +574,7 @@ class DirectionalFDN:
         NDArray, shape (B,)
             Applied correction in dB.
         """
-        #local import: src.analysis imports src.fdn
-        from ..analysis import band_energy
+        #local import: src.analysis imports src
 
         if self._early_reflections is not None and self._er_injected:
             raise ValueError(

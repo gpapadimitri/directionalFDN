@@ -6,9 +6,9 @@ import numpy as np
 import pytest
 
 from src.analysis import band_energy, decay_fit
-from src.fdn.directional_fdn import DirectionalFDN
-from src.fdn.fdn_components import geq_band_frequencies
-from src.fdn.room import Reflection
+from src.directional_fdn import DirectionalFDN
+from src.fdn_components import geq_band_frequencies
+from src.room import Reflection
 
 FS = 48000
 BANDS = np.array([62.5, 125.0, 250.0, 500.0, 1000.0, 2000.0, 4000.0, 8000.0])

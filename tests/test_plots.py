@@ -9,7 +9,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
 
-from src.fdn import spatial  # noqa: E402
+from src import spatial  # noqa: E402
 from src.utils import (  # noqa: E402
     plot_band_correlation,
     plot_directional_map,

@@ -5,6 +5,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+from src import spatial
 from src.analysis import (
     band_correlation,
     decay_fit,
@@ -12,8 +13,7 @@ from src.analysis import (
     predicted_beam_decay,
     sh_to_beams,
 )
-from src.fdn import spatial
-from src.fdn.directional_fdn import DirectionalFDN
+from src.directional_fdn import DirectionalFDN
 
 FS = 48000
 BANDS = np.array([62.5, 125.0, 250.0, 500.0, 1000.0, 2000.0, 4000.0, 8000.0])

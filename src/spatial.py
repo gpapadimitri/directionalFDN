@@ -75,7 +75,7 @@ def quadrature_grid(order: int) -> tuple[NDArray, NDArray]:
     the library, so it takes *order* rather than ``2 * order``.  Passing the
     doubled value asks for degree ``4L``: at order 3 that is 86 points where
     26 suffice, and the delay-line count of a
-    :class:`~src.fdn.directional_fdn.DirectionalFDN` scales with it.
+    :class:`~src.directional_fdn.DirectionalFDN` scales with it.
     The orthogonality error is identical either way, and slightly worse on
     the larger grid, there being more points to sum over.
 

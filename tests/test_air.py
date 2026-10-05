@@ -5,10 +5,10 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from src.fdn.air import Atmosphere
-from src.fdn.directional_fdn import DirectionalFDN
-from src.fdn.fdn_components import geq_band_frequencies
-from src.fdn.room import shoebox_reflections
+from src.air import Atmosphere
+from src.directional_fdn import DirectionalFDN
+from src.fdn_components import geq_band_frequencies
+from src.room import shoebox_reflections
 from src.utils import db2lin
 
 FS = 48000.0
