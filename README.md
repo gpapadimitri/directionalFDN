@@ -32,29 +32,15 @@ The package is imported as `src`.
 import numpy as np
 from src import DirectionalFDN
 
-fdn = DirectionalFDN(sample_rate=48000, num_delay_line_groups=8, sh_order=2, seed=0)
+dfdn = DirectionalFDN(sample_rate=48000, num_delay_line_groups=8, sh_order=2, seed=0)
 
-# T60 in ms at the ten octave centres 31.25 Hz to 16 kHz
-# (src.fdn_components.geq_band_frequencies). A (Q, 10) array sets it per
-# grid direction as well.
-t60_ms = np.array([900, 900, 900, 1000, 1100, 1000, 800, 700, 600, 600.0])
-fdn.setup(delay_range_ms=(10, 50), t60_per_direction_ms=t60_ms)
+# T60 in ms per octave band, 62.5 Hz to 16 kHz; the absorption design also
+# takes a value at 31.25 Hz, here held at the 62.5 Hz one
+t60_ms = np.array([900, 900, 1000, 1100, 1000, 800, 700, 600, 600.0])
+dfdn.setup(delay_range_ms=(10, 50), t60_per_direction_ms=np.r_[t60_ms[0], t60_ms])
 
-# Ambisonic RIR, ACN/SN3D, shape ((sh_order + 1)^2, samples)
-rir = fdn.render(source_azimuth=0.0, source_elevation=0.0, length_seconds=1.0)
-```
-
-## Examples
-
-- `examples/dfdn_directional.ipynb`: the grid network. Decay per direction and
-  frequency, echo density, output decorrelation, early reflections.
-- `examples/dfdn_directional_2019.ipynb`: the same outline for the
-  spherical-harmonic network.
-
-## Tests
-
-```bash
-pytest
+# Ambisonic RIR, ACN/SN3D
+rir = dfdn.render(source_azimuth=0.0, source_elevation=0.0, length_seconds=1.0)
 ```
 
 ## References
@@ -69,7 +55,3 @@ pytest
 4. B. Alary and V. Välimäki, "A Method for Capturing and Reproducing
    Directional Reverberation in Six Degrees of Freedom," in Proc. Immersive
    and 3D Audio: from Architecture to Automotive (I3DA), Bologna, Italy, 2021.
-
-## License
-
-MIT, see [LICENSE](LICENSE).
