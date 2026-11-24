@@ -1,18 +1,6 @@
 # directional_fdn
 
-Directional Feedback Delay Network (DFDN) for Ambisonic room impulse response
-synthesis: a reverberator whose decay time depends on direction as well as on
-frequency. Two formulations by Alary et al. are implemented on top of
-[pyFDN](https://github.com/artificial-audio/pyFDN):
-
-- `DirectionalFDN` (`src/directional_fdn.py`), after ICASSP 2020 [2]: one
-  channel per incident direction on a spherical grid, with an absorption filter
-  per direction. The working reverberator.
-- `DFDN2019` (`src/dfdn_2019.py`), after JAES 2019 [1]: spherical-harmonic
-  state with a directional weighting matrix. Kept for comparison.
-
-Around them: shoebox image-source early reflections, ISO 9613-1 air
-absorption, and directional decay, level and correlation analysis.
+Directional Feedback Delay Network (DFDN) for Ambisonic room impulse response synthesis (see References).
 
 ## Installation
 
@@ -34,13 +22,12 @@ from src import DirectionalFDN
 
 dfdn = DirectionalFDN(sample_rate=48000, num_delay_line_groups=8, sh_order=2, seed=0)
 
-# T60 in ms per octave band, 62.5 Hz to 16 kHz; the absorption design also
-# takes a value at 31.25 Hz, here held at the 62.5 Hz one
-t60_ms = np.array([900, 900, 1000, 1100, 1000, 800, 700, 600, 600.0])
-dfdn.setup(delay_range_ms=(10, 50), t60_per_direction_ms=np.r_[t60_ms[0], t60_ms])
+# T60 in ms per octave band, 31.25 Hz to 16 kHz.
+t60_ms = np.array([800, 900, 900, 1000, 1100, 1000, 800, 700, 600, 600])
+dfdn.setup(delay_range_ms=(10, 50), t60_per_direction_ms=t60_ms)
 
 # Ambisonic RIR, ACN/SN3D
-rir = dfdn.render(source_azimuth=0.0, source_elevation=0.0, length_seconds=1.0)
+rir = dfdn.render(source_azimuth=0.0, source_elevation=0.0)
 ```
 
 ## References
