@@ -1,6 +1,6 @@
 # directionalFDN
 
-Directional Feedback Delay Network (DFDN) for Ambisonic room impulse response synthesis (see References).
+Directional Feedback Delay Network (DFDN) for Ambisonic room impulse response synthesis.
 
 ## Installation
 
