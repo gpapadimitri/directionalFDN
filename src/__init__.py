@@ -1,5 +1,5 @@
 """
-directional_fdn -- Directional Feedback Delay Network (DFDN)
+directionalfdn -- Directional Feedback Delay Network (DFDN)
 
 Two published formulations for Ambisonic room impulse response synthesis:
 

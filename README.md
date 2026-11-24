@@ -1,4 +1,4 @@
-# directional_fdn
+# directionalFDN
 
 Directional Feedback Delay Network (DFDN) for Ambisonic room impulse response synthesis (see References).
 
@@ -7,8 +7,8 @@ Directional Feedback Delay Network (DFDN) for Ambisonic room impulse response sy
 Python 3.10 or newer.
 
 ```bash
-git clone https://github.com/gpapadimitri/directional_fdn.git
-cd directional_fdn
+git clone https://github.com/gpapadimitri/directionalFDN.git
+cd directionalFDN
 pip install -e .          # or: pip install -e ".[dev]" for tests and linting
 ```
 

@@ -7,7 +7,7 @@ where = ["."]
 include = ["src", "src.*"]
 
 [project]
-name = "directional_fdn"
+name = "directionalfdn"
 version = "0.1.0"
 description = "Directional Feedback Delay Network (DFDN) for Ambisonics RIR synthesis"
 readme = "README.md"

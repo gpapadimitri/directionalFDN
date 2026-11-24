@@ -1,4 +1,4 @@
-"""Shared fixtures for the directional_fdn test suite."""
+"""Shared fixtures for the directionalfdn test suite."""
 
 from __future__ import annotations
 
