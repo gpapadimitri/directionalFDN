@@ -1,3 +1,5 @@
+"""Unit conversions, reverberation-time estimation and plot helpers."""
+
 from __future__ import annotations
 
 import matplotlib.pyplot as plt
@@ -9,14 +11,17 @@ from pyrato.edc import energy_decay_curve_chu_lundeby
 from pyrato.parameters import reverberation_time_linear_regression
 from scipy.signal import butter, sosfilt
 
-#: Linear magnitude to decibels, and back.  Re-exported from pyFDN rather than
-#: reimplemented; both clamp instead of biasing, so they are exact inverses.
+#: Linear magnitude to decibels, clamped at the smallest positive float.
 lin2db = pyFDN.lin_to_db
-db2lin = pyFDN.db_to_lin
 
-#: Milliseconds to samples.  pyFDN rounds where the previous local version
-#: truncated -- a sub-sample difference on delay-range bounds.
-ms_to_samps = pyFDN.ms_to_smp
+
+def db2lin(db: NDArray | float) -> NDArray:
+    """Decibels to linear magnitude, the inverse of :func:`lin2db`."""
+    return np.power(10.0, np.asarray(db, dtype=float) / 20.0)
+
+
+#: Milliseconds to samples, rounded to the nearest sample.
+ms_to_samps = pyFDN.ms_to_samples
 
 
 # ---------------------------------------------------------------------------
@@ -39,7 +44,6 @@ OCTAVE_BANDS = np.array(
 
 #: Reference centre for the octave grid; pyFDN counts bands in octaves from it.
 _BAND_REF_HZ = 1000.0
-
 
 
 def estimate_t30(ir: NDArray, fs: float, bands: NDArray = OCTAVE_BANDS) -> NDArray:
@@ -69,7 +73,7 @@ def estimate_t30(ir: NDArray, fs: float, bands: NDArray = OCTAVE_BANDS) -> NDArr
         filtered = sosfilt(sos, ir)
         peak = np.max(np.abs(filtered))
         if peak > 0:
-            noise_floor = peak * 1e-6  # −120 dB below peak
+            noise_floor = peak * 1e-6  # -120 dB below peak
             rng = np.random.default_rng(42)
             dithered = filtered + rng.standard_normal(len(filtered)) * noise_floor
         else:
@@ -96,7 +100,7 @@ def plot_t30(ir: NDArray, fs: float) -> None:
         Sample rate in Hz.
     """
     t60, f_centre = pyFDN.estimate_rt_bands(
-        ir, fs, start=_band_start(OCTAVE_BANDS), n=len(OCTAVE_BANDS)
+        ir, fs, lowest_octave=_band_start(OCTAVE_BANDS), num_bands=len(OCTAVE_BANDS)
     )
 
     fig, ax = plt.subplots(figsize=(7, 4))
@@ -158,8 +162,8 @@ def plot_edc(ir: NDArray, fs: float) -> None:
 
     bands, f_centre = pyFDN.octave_bands(
         fc=_BAND_REF_HZ,
-        start=_band_start(OCTAVE_BANDS),
-        n=len(OCTAVE_BANDS),
+        lowest_octave=_band_start(OCTAVE_BANDS),
+        num_bands=len(OCTAVE_BANDS),
         fs=fs,
     )
     sos_bank = pyFDN.octave_band_filterbank(bands, fs)
@@ -259,7 +263,8 @@ def energy_decay_deviation(directional_irs: NDArray) -> NDArray:
     return edc_db - edc_db.mean(axis=0)
 
 
-#: Bounds on the FDN loop's pole magnitudes against frequency.  Takes the
+#: Bounds on the FDN loop's pole magnitudes against frequency,
+#: ``pole_bounds(delays, A, fs, *, post_delay, nfft=4096)``.  Takes the
 #: absorption as the ``(n_sections, 6, N)`` bank of
 #: :func:`src.fdn_components.design_absorption_sos` and works from the
 #: cascade, not a flattened transfer function.

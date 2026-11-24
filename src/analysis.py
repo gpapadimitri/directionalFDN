@@ -1,7 +1,7 @@
 """Directional decay, level and correlation analysis for grid and Ambisonic RIRs.
 
-Octave bands are pyfar's, as in the hybrid-rir ODEON notebook; decay fits are
-pyrato's ISO 3382 regression. The intercept of the fit gives the initial
+Octave bands are pyfar's; decay fits are pyrato's ISO 3382 regression. The
+intercept of the fit gives the initial
 power, as in the EDR analysis of Gallien et al. (DAFx26, Sec. 3.2).
 """
 

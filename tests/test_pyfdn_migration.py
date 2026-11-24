@@ -5,7 +5,11 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from src.fdn_components import generate_delay_lengths, geq_band_frequencies
+from src.fdn_components import (
+    FeedbackMatrixType,
+    generate_delay_lengths,
+    geq_band_frequencies,
+)
 
 
 class TestDelayLengths:
@@ -67,13 +71,13 @@ class TestAbsorptionDesign:
         assert sos.shape == (11, 6, 4)
         np.testing.assert_allclose(sos[:, 3, :], 1.0)  # a0 normalised
 
-    def test_matches_pyfdn_decay_to_geq(self):
+    def test_matches_pyfdn_decay_to_graphic_eq(self):
         """Rows of an (N, 10) target map to pyFDN's (10, N) columns."""
         import pyFDN
 
         from src.fdn_components import design_absorption_sos
 
-        expected = pyFDN.decay_to_geq(self.T60_S, self.DELAYS, self.FS)
+        expected = pyFDN.eq.decay_to_graphic_eq(self.T60_S, self.DELAYS, self.FS)
         actual = design_absorption_sos(self.T60_S, self.DELAYS, self.FS)
         np.testing.assert_allclose(actual, expected, rtol=1e-8, atol=1e-12)
 
@@ -82,7 +86,7 @@ class TestAbsorptionDesign:
         for i, m in enumerate(self.DELAYS):
             np.testing.assert_allclose(
                 actual[:, :, i],
-                pyFDN.decay_to_geq(t60[i], np.array([m]), self.FS)[:, :, 0],
+                pyFDN.eq.decay_to_graphic_eq(t60[i], np.array([m]), self.FS)[:, :, 0],
                 rtol=1e-8, atol=1e-12,
             )
 
@@ -142,19 +146,19 @@ class TestPlainFDNOnPyFDN:
         C = np.ones((1, 8)) / np.sqrt(8)
         if gains is not None:
             A, C = A * gains, C * gains
-        build = pyFDN.FDNBuild(
-            A=A, B=np.ones((8, 1)) / np.sqrt(8), C=C, D=np.zeros((1, 1)),
-            delays=self.DELAYS, fs=self.FS, post_delay=post_delay,
+        graph = pyFDN.dss_to_td(
+            self.DELAYS, A, np.ones((8, 1)) / np.sqrt(8), C, np.zeros((1, 1)),
+            post_delay=post_delay,
         )
-        x = np.zeros(int(seconds * self.FS))
-        x[0] = 1.0
-        return pyFDN.process_fdn(x, build)
+        return graph.impulse_response(int(seconds * self.FS)).ravel()
 
     def test_broadband_gains_folded_into_a_and_c(self, measured_t60):
         """diag(g) after the delays is A @ diag(g) and C @ diag(g)."""
         import pyFDN
 
-        g = pyFDN.db_to_lin(pyFDN.rt_to_slope(1.5, self.FS) * self.DELAYS)
+        from src.utils import db2lin
+
+        g = db2lin(pyFDN.rt_to_slope(1.5, self.FS) * self.DELAYS)
         rt = measured_t60(self._render(gains=g), self.FS)
         np.testing.assert_allclose(rt[1:], 1.5, rtol=0.05)
 
@@ -462,7 +466,7 @@ class TestAirAbsorption:
                           direct_gain=0.0, er_gain=0.0)[0]
             import pyFDN
 
-            rt[air], fc = pyFDN.estimate_rt_bands(w, self.FS, n=8, start=-4)
+            rt[air], fc = pyFDN.estimate_rt_bands(w, self.FS, num_bands=8, lowest_octave=-4)
         top = int(np.argmin(np.abs(fc - 8000.0)))
         assert rt[True][top] < rt[False][top]      # 8 kHz decays faster
         low = int(np.argmin(np.abs(fc - 125.0)))
@@ -495,7 +499,7 @@ class TestFeedbackMatrixFromPyFDN:
 
         fb = FeedbackMatrix(8, FeedbackMatrixType.HADAMARD)
         np.testing.assert_allclose(
-            fb.matrix, pyFDN.fdn_matrix_gallery(8, "Hadamard"), atol=1e-15
+            fb.matrix, pyFDN.fdn_matrix_gallery(8, "hadamard"), atol=1e-15
         )
 
     def test_householder_stays_the_canonical_all_ones(self):
@@ -519,7 +523,7 @@ class TestFeedbackMatrixFromPyFDN:
         assert not np.allclose(a, c)
 
     def test_random_does_not_disturb_the_global_stream(self):
-        """pyFDN's gallery draws from global np.random; we must restore it."""
+        """Seeding goes through pyFDN's rng, never NumPy's global generator."""
         from src.fdn_components import FeedbackMatrix, FeedbackMatrixType
 
         np.random.seed(0)
@@ -660,6 +664,15 @@ class TestLosslessnessChecks:
         dfdn.setup(delay_range_ms=(20.0, 60.0), des_t60_ms=1500.0)
         assert pyFDN.is_unilossless(dfdn._kronecker_matrix)
 
+    @pytest.mark.parametrize("kind", list(FeedbackMatrixType))
+    def test_both_networks_accept_every_feedback_type(self, kind):
+        """DIAGONALLY_SIMILAR is lossless without being orthogonal."""
+        from src.dfdn_2019 import DFDN2019
+        from src.directional_fdn import DirectionalFDN
+
+        DirectionalFDN(self.FS, 4, sh_order=1, seed=42).setup(feedback_type=kind)
+        DFDN2019(self.FS, 4, ambisonics_order=1, seed=42).setup(feedback_type=kind)
+
     def test_directional_fdn_kronecker_matrix_stays_lossless(self):
         """A kron I_Q is lossless whenever A is (ICASSP 2020, Sec. 3)."""
         import pyFDN
@@ -703,8 +716,8 @@ class TestPoleBounds:
         from src.utils import pole_bounds
 
         lo, hi, f = pole_bounds(
-            self.DELAYS, self._sos(np.full(self.FREQS.size, 1.2)),
-            self._A(), self.FS, nfft=512,
+            self.DELAYS, self._A(), self.FS,
+            post_delay=self._sos(np.full(self.FREQS.size, 1.2)), nfft=512,
         )
         assert lo.shape == hi.shape == f.shape == (512,)
         assert f[0] == pytest.approx(0.0)
@@ -716,7 +729,8 @@ class TestPoleBounds:
         from src.utils import pole_bounds
 
         _, hi, _ = pole_bounds(
-            self.DELAYS, self._sos(np.full(self.FREQS.size, 1.2)), self._A(), self.FS
+            self.DELAYS, self._A(), self.FS,
+            post_delay=self._sos(np.full(self.FREQS.size, 1.2)),
         )
         assert np.all(hi < 1.0)
 
@@ -724,10 +738,12 @@ class TestPoleBounds:
         from src.utils import pole_bounds
 
         _, hi_long, _ = pole_bounds(
-            self.DELAYS, self._sos(np.full(self.FREQS.size, 2.0)), self._A(), self.FS
+            self.DELAYS, self._A(), self.FS,
+            post_delay=self._sos(np.full(self.FREQS.size, 2.0)),
         )
         _, hi_short, _ = pole_bounds(
-            self.DELAYS, self._sos(np.full(self.FREQS.size, 0.5)), self._A(), self.FS
+            self.DELAYS, self._A(), self.FS,
+            post_delay=self._sos(np.full(self.FREQS.size, 0.5)),
         )
         assert np.all(hi_short < hi_long)
 
@@ -735,7 +751,8 @@ class TestPoleBounds:
         from src.utils import pole_bounds
 
         lo, hi, _ = pole_bounds(
-            self.DELAYS, self._sos(np.full(self.FREQS.size, 1.2)), self._A(), self.FS
+            self.DELAYS, self._A(), self.FS,
+            post_delay=self._sos(np.full(self.FREQS.size, 1.2)),
         )
         assert np.all(lo <= hi + 1e-12)
 
@@ -743,21 +760,20 @@ class TestPoleBounds:
         from src.utils import pole_bounds
 
         lo, hi, f = pole_bounds(
-            self.DELAYS, self._sos(np.full(self.FREQS.size, 1.2)),
-            np.eye(4), self.FS, nfft=256,
+            self.DELAYS, np.eye(4), self.FS,
+            post_delay=self._sos(np.full(self.FREQS.size, 1.2)), nfft=256,
         )
         assert lo.shape == (256,)
 
 
 class TestHelpersComeFromPyFDN:
-    def test_db_helpers_are_pyfdn(self):
+    def test_helpers_are_pyfdn_where_it_has_them(self):
         import pyFDN
 
         from src import utils
 
         assert utils.lin2db is pyFDN.lin_to_db
-        assert utils.db2lin is pyFDN.db_to_lin
-        assert utils.ms_to_samps is pyFDN.ms_to_smp
+        assert utils.ms_to_samps is pyFDN.ms_to_samples
 
     def test_db_roundtrip_still_holds(self):
         from src.utils import db2lin, lin2db
@@ -1587,7 +1603,7 @@ class TestGridOutput:
         grid = pw.render(0.0, 0.0, 3.0, direct_gain=0.0, grid_output=True)
 
         slowest, fastest = int(np.argmax(scale)), int(np.argmin(scale))
-        rt_slow, _ = pyFDN.estimate_rt_bands(grid[slowest], self.FS, start=-3)
-        rt_fast, _ = pyFDN.estimate_rt_bands(grid[fastest], self.FS, start=-3)
+        rt_slow, _ = pyFDN.estimate_rt_bands(grid[slowest], self.FS, lowest_octave=-3)
+        rt_fast, _ = pyFDN.estimate_rt_bands(grid[fastest], self.FS, lowest_octave=-3)
         ratio = np.median(rt_fast[1:-1]) / np.median(rt_slow[1:-1])
         assert ratio == pytest.approx(scale[fastest] / scale[slowest], rel=0.2)

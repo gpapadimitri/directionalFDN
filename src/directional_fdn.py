@@ -43,7 +43,7 @@ Usage
 >>> pw = DirectionalFDN(
 ...     sample_rate=48000,
 ...     num_delay_line_groups=8,
-...     sh_order=2,  # Q ≥ (L+1)² grid points
+...     sh_order=2,  # Q >= (L+1)^2 grid points
 ... )
 >>> pw.setup(
 ...     delay_range_ms=(10, 50),
@@ -63,7 +63,7 @@ import warnings
 import numpy as np
 import pyFDN
 from numpy.typing import NDArray
-from pyFDN.eq import gain_to_geq
+from pyFDN.eq import gain_to_graphic_eq
 from pyFDN.td import SOSBank
 from scipy.signal import sosfilt
 
@@ -82,7 +82,7 @@ from .room import Reflection
 from .utils import db2lin
 
 # ---------------------------------------------------------------------------
-# Early Reflection Module (Eqs. 3–5)
+# Early Reflection Module (Eqs. 3-5)
 # ---------------------------------------------------------------------------
 
 def _reflection_fir(
@@ -133,7 +133,6 @@ class EarlyReflectionModule:
     ) -> None:
         self.reflections = reflections
         self.sh_order = sh_order
-
 
 
 # ---------------------------------------------------------------------------
@@ -196,9 +195,9 @@ class DirectionalFDN:
     sample_rate : float
         Audio sample rate in Hz.
     num_delay_line_groups : int
-        *N* — number of delay-line groups.
+        *N* -- number of delay-line groups.
     sh_order : int
-        SH order *L* controlling grid density: Q ≥ (L+1)².
+        SH order *L* controlling grid density: Q >= (L+1)^2.
     output_sh_order : int, optional
         SH order of the rendered Ambisonics RIR.  Defaults to *sh_order*.
         Setting this lower than *sh_order* lets you keep a dense
@@ -244,7 +243,7 @@ class DirectionalFDN:
         self.Q = (sh_order + 1) ** 2  # grid points
         self.seed = seed
 
-        self.total_delay_lines = num_delay_line_groups * self.Q  # N × Q
+        self.total_delay_lines = num_delay_line_groups * self.Q  # N x Q
         self.num_outputs = (output_sh_order + 1) ** 2  # Ambisonics channels
 
         # State
@@ -282,17 +281,16 @@ class DirectionalFDN:
     def _init_grid(self) -> None:
         """Generate the Q-point spatial grid.
 
-        Uses proper spherical quadrature grids (t-designs) for orders
-        1–3, which satisfy the discrete orthogonality condition for SH
-        products.  Falls back to Fibonacci spiral for unsupported orders.
-        Note: for order ≥ 2, Q may be larger than (L+1)² to satisfy
-        the quadrature condition.
+        A spherical t-design of degree 2L, which satisfies the discrete
+        orthogonality condition for SH products up to order L.  Falls back
+        to a Fibonacci spiral of (L+1)^2 points where no design is available.
+        A t-design has more than (L+1)^2 points, so Q is updated to its size.
         """
         try:
             self.grid_azimuths, self.grid_elevations = spatial.quadrature_grid(
                 self.sh_order
             )
-            # Update Q to match actual grid size (may differ from (L+1)²)
+            # Update Q to match actual grid size (may differ from (L+1)^2)
             actual_Q = len(self.grid_azimuths)
             if actual_Q != self.Q:
                 self.Q = actual_Q
@@ -325,12 +323,12 @@ class DirectionalFDN:
         t60_per_direction_ms : float or NDArray
             Controls the target reverberation time.  Accepted formats:
 
-            * **scalar** — same T60 for all directions and frequencies
+            * **scalar** -- same T60 for all directions and frequencies
               (isotropic, broadband).
-            * **shape (10,)** — frequency-dependent T60, same for all
+            * **shape (10,)** -- frequency-dependent T60, same for all
               directions.
-            * **shape (Q,)** — direction-dependent T60, broadband.
-            * **shape (Q, 10)** — direction- *and* frequency-dependent.
+            * **shape (Q,)** -- direction-dependent T60, broadband.
+            * **shape (Q, 10)** -- direction- *and* frequency-dependent.
               Row *q* gives the T60 for grid direction *q*.
 
             The ten frequency values are read at
@@ -338,7 +336,7 @@ class DirectionalFDN:
             the graphic EQ designs on: octave centres 31.25 Hz to 16 kHz,
             interpolated linearly in hertz between them and held beyond.
         feedback_type : FeedbackMatrixType
-            Type of base N×N feedback matrix.
+            Type of base NxN feedback matrix.
         air_absorption : bool or Atmosphere, optional
             Treat *t60_per_direction_ms* as the **boundary-only** target and
             add atmospheric absorption (ISO 9613-1) on top of it: ``True`` for
@@ -369,7 +367,7 @@ class DirectionalFDN:
         N = self.num_delay_line_groups
         Q = self.Q  # read AFTER grid init, since Q may have changed
 
-        # 1. Delay-line lengths — independent per channel (ICASSP Sec. 3)
+        # 1. Delay-line lengths -- independent per channel (ICASSP Sec. 3)
         if rng is None and self.seed is not None:
             rng = np.random.default_rng(self.seed)
         all_lengths = generate_delay_lengths(
@@ -377,7 +375,7 @@ class DirectionalFDN:
         )
         self.delay_length_samps = all_lengths
 
-        # 2. Feedback matrix A ⊗ I_Q (ICASSP 2020, Sec. 3)
+        # 2. Feedback matrix A kron I_Q (ICASSP 2020, Sec. 3)
         self._init_kronecker_feedback(feedback_type)
 
         # 3. Per-direction absorption
@@ -394,7 +392,7 @@ class DirectionalFDN:
         # A (Q,) target is broadband per direction and a (GEQ_NUM_BANDS,) one
         # is frequency-dependent per band, so a grid of exactly that many
         # points would be ambiguous.  No grid this class builds has one --
-        # quadrature designs give 14, 42, 86 or 146, the Fibonacci fallback
+        # the t-designs have 6, 14, 26, 42, ... points, the Fibonacci fallback
         # (L+1)^2 -- but say so rather than resolve it silently.
         if Q == GEQ_NUM_BANDS:
             raise ValueError(
@@ -404,19 +402,19 @@ class DirectionalFDN:
             )
 
         if t60.ndim == 0:
-            # Scalar → same broadband T60 for all channels
+            # Scalar -> same broadband T60 for all channels
             t60_expanded = np.full(N * Q, float(t60))
 
         elif t60.ndim == 1 and t60.shape[0] == Q:
-            # (Q,) → direction-dependent broadband
+            # (Q,) -> direction-dependent broadband
             t60_expanded = np.tile(t60, N)
 
         elif t60.ndim == 1 and t60.shape[0] == GEQ_NUM_BANDS:
-            # (GEQ_NUM_BANDS,) → frequency-dependent, same for all directions
+            # (GEQ_NUM_BANDS,) -> frequency-dependent, same for all directions
             t60_expanded = np.tile(t60[np.newaxis, :], (N * Q, 1))
 
         elif t60.ndim == 2 and t60.shape == (Q, GEQ_NUM_BANDS):
-            # (Q, GEQ_NUM_BANDS) → direction- and frequency-dependent
+            # (Q, GEQ_NUM_BANDS) -> direction- and frequency-dependent
             t60_expanded = np.tile(t60, (N, 1))
 
         else:
@@ -467,7 +465,7 @@ class DirectionalFDN:
             )
             self.absorption_gains = None
 
-        # 5. Output encoding matrix E (Eq. 13) — default: Ambisonics
+        # 4. Output encoding matrix E (Eq. 13) -- default: Ambisonics
         self._init_ambisonics_encoding()
 
     def set_early_reflections(
@@ -532,7 +530,7 @@ class DirectionalFDN:
                 f"(Q={Q}, {GEQ_NUM_BANDS}), got shape {v.shape}."
             )
         #|H|^2 = P, so the magnitude target in dB is the power gain in dB
-        self._p0_sos = np.asarray(gain_to_geq(gains, self.sample_rate))
+        self._p0_sos = np.asarray(gain_to_graphic_eq(gains, self.sample_rate))
 
     def match_late_level(
         self,
@@ -574,8 +572,6 @@ class DirectionalFDN:
         NDArray, shape (B,)
             Applied correction in dB.
         """
-        #local import: src.analysis imports src
-
         if self._early_reflections is not None and self._er_injected:
             raise ValueError(
                 "The injected early reflections recirculate with the tail; call "
@@ -671,7 +667,9 @@ class DirectionalFDN:
         self._kronecker_matrix = np.kron(
             self._base_feedback.matrix, np.eye(self.Q)
         )
-        if not pyFDN.is_unilossless(self._kronecker_matrix, tol=1e-8):
+        # A kron I_Q is lossless exactly when A is, and pyFDN's test does not
+        # recognise the product of a diagonally-similar A, so test A itself.
+        if not pyFDN.is_unilossless(self._base_feedback.matrix, tol=1e-8):
             raise RuntimeError(
                 "Kronecker feedback matrix is not lossless; the recursion "
                 "would not preserve energy."
@@ -691,8 +689,7 @@ class DirectionalFDN:
         and specify it in Sec. III C from ``EDC_0``, the energy-decay curve's
         first sample, measured per direction on a captured SRIR.
 
-        Uniform weights are the isotropic special case and remain the default,
-        so leaving this unset reproduces the previous behaviour exactly.
+        Uniform weights are the isotropic special case and the default.
 
         Parameters
         ----------
@@ -836,7 +833,7 @@ class DirectionalFDN:
 
         Returns
         -------
-        NDArray, shape ((L_out+1)², num_samples)
+        NDArray, shape ((L_out+1)^2, num_samples)
             Ambisonics RIR in ACN/SN3D format, or ``(Q, num_samples)`` on the
             grid when *grid_output* is set.
         """
@@ -863,15 +860,15 @@ class DirectionalFDN:
     ) -> NDArray:
         """Process mono input through the network.
 
-        Signal flow (Fig. 1, Eqs. 11–12 of ICASSP 2020):
+        Signal flow (Fig. 1, Eqs. 11-12 of ICASSP 2020):
 
-        For non-ER groups (i ≠ λ):
-            s_i = Z_i [b_i x + Σ A_ij G_j s_j]      (Eq. 12)
-        For ER group (i = λ):
-            s_λ = s'(n) + Z_λ [Σ A_λj G_j s_j]       (Eq. 12)
+        For non-ER groups (i != lambda):
+            s_i = Z_i [b_i x + sum_j A_ij G_j s_j]             (Eq. 12)
+        For the ER group (i = lambda):
+            s_i = s'(n) + Z_i [sum_j A_ij G_j s_j]             (Eq. 12)
         Output:
-            y' = Σ C_i G_i s_i + d x                  (Eq. 11)
-            y  = E y'                                  (Eq. 13)
+            y' = sum_i C_i G_i s_i + d x                       (Eq. 11)
+            y  = E y'                                          (Eq. 13)
 
         Parameters
         ----------
@@ -885,7 +882,7 @@ class DirectionalFDN:
 
         Returns
         -------
-        NDArray, shape ((L+1)², num_samples), or (Q, num_samples) on the grid
+        NDArray, shape ((L+1)^2, num_samples), or (Q, num_samples) on the grid
         """
         self._check_ready()
         if input_data.shape[0] != 1:
@@ -912,7 +909,7 @@ class DirectionalFDN:
         c = self._build_output_gains()               # (Q, NQ)
         d = self._build_direct_gain(source_azimuth, source_elevation) * float(
             direct_gain
-        )                                            # (n_out, 1)
+        )                                            # (Q, 1)
         E = np.eye(Q) if grid_output else self._encoding_matrix
 
         A = self._kronecker_matrix

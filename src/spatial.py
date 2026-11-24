@@ -1,3 +1,5 @@
+"""Spherical-harmonic encoding, spherical grids and VBAP."""
+
 from __future__ import annotations
 
 import numpy as np
@@ -24,17 +26,17 @@ def encode_directions(
     Parameters
     ----------
     azimuths : float or NDArray
-        Azimuth in **radians** (0 = front, π/2 = left).
+        Azimuth in **radians** (0 = front, pi/2 = left).
     elevations : float or NDArray
-        Elevation in **radians** (0 = horizontal, π/2 = up).  Broadcast
+        Elevation in **radians** (0 = horizontal, pi/2 = up).  Broadcast
         against *azimuths*.
     order : int
         Maximum Ambisonics order.
 
     Returns
     -------
-    NDArray, shape ``np.shape(azimuths) + ((order+1)²,)``
-        SN3D coefficients: a vector for one direction, a ``(D, (order+1)²)``
+    NDArray, shape ``np.shape(azimuths) + ((order+1)^2,)``
+        SN3D coefficients: a vector for one direction, a ``(D, (order+1)^2)``
         matrix for *D*.
     """
     azimuths, elevations = np.broadcast_arrays(
@@ -69,7 +71,7 @@ def quadrature_grid(order: int) -> tuple[NDArray, NDArray]:
     A t-design of degree ``t = 2L``, which is what ICASSP 2020 Sec. 3 asks
     for -- "at least Q >= (L+1)^2 uniform points, such as spherical t-designs
     of degree t = 2L" -- and what the discrete SN3D orthogonality condition
-    ``Y^T Y · (4π/Q) = diag(4π/(2l+1))`` needs to hold exactly.
+    ``Y^T Y * (4 pi / Q) = diag(4 pi / (2l+1))`` needs to hold exactly.
 
     ``spharpy``'s *n_max* is already an SH order, doubled to a degree inside
     the library, so it takes *order* rather than ``2 * order``.  Passing the
@@ -82,12 +84,12 @@ def quadrature_grid(order: int) -> tuple[NDArray, NDArray]:
     Parameters
     ----------
     order : int
-        SH order (≥ 1).
+        SH order (>= 1).
 
     Returns
     -------
     azimuths, elevations : NDArray
-        Grid directions in radians.  Length Q ≥ (order+1)².
+        Grid directions in radians.  Length Q >= (order+1)^2.
     """
     if order < 1:
         raise ValueError(f"quadrature_grid requires order >= 1, got {order}")

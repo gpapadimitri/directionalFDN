@@ -22,7 +22,7 @@ def delay_range_from_room(
 ) -> tuple[float, float]:
     """Compute FDN delay range (ms) from room dimensions.
 
-    The range brackets the **mean free path** τ = 4V/(Sc) (Sabine), which
+    The range brackets the **mean free path** tau = 4V/(Sc) (Sabine), which
     is the standard FDN heuristic (Jot).  The room diagonal is *not* a
     physically meaningful upper bound for inter-reflection delay times.
 
@@ -34,8 +34,8 @@ def delay_range_from_room(
         Speed of sound in m/s.
     spread : (float, float)
         Multiplicative spread around the mean free path. Default
-        (0.4, 2.0) — wide enough to provide ~688 distinct integer delay
-        lengths in typical rooms (NQ for sh_order=3, N=8).
+        (0.4, 2.0) -- wide enough to give every delay line of a typical
+        network (N*Q = 208 for sh_order=3, N=8) a distinct integer length.
 
     Returns
     -------
@@ -48,7 +48,6 @@ def delay_range_from_room(
     mean_free_path = 4.0 * V / S
     tau_ms = 1000.0 * mean_free_path / speed_of_sound
     return (spread[0] * tau_ms, spread[1] * tau_ms)
-
 
 
 # ---------------------------------------------------------------------------

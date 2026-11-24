@@ -1,11 +1,11 @@
-"""The three FDN ingredients a :class:`pyFDN.FDNBuild` needs from this package.
+"""The three FDN ingredients a :class:`pyFDN.DSS` needs from this package.
 
 * **Delay lengths** -- :func:`generate_delay_lengths`, over
   :func:`pyFDN.sample_delay_lengths`.
 * **Feedback matrix** -- :class:`FeedbackMatrix`, over
   :func:`pyFDN.fdn_matrix_gallery`.
 * **Absorption** -- :func:`design_absorption_sos`, over
-  :func:`pyFDN.decay_to_geq`, passed to pyFDN as ``post_delay``.
+  :func:`pyFDN.eq.decay_to_graphic_eq`, passed to pyFDN as ``post_delay``.
 
 Feedback matrices
 -----------------
@@ -18,15 +18,13 @@ Feedback matrices
 * ``ANDERSON``           -- Anderson's construction.
 * ``TINY_ROTATION``      -- near-identity rotation.
 
-All generators come from ``pyFDN``.  ``pyFDN`` draws from NumPy's *global*
-random state and exposes no seed parameter, so :func:`_seeded` saves that
-state, seeds it, and restores it -- keeping this package reproducible without
-disturbing the caller's own stream.
+All generators come from ``pyFDN`` and are seeded through its ``rng``, so
+NumPy's global random state is never touched.
 
 Absorption
 ----------
 Graphic-EQ absorption (Schlecht and Habets, DAFx 2017).
-:func:`pyFDN.decay_to_geq` already takes one T60 curve per delay line -- what
+:func:`pyFDN.eq.decay_to_graphic_eq` already takes one T60 curve per delay line -- what
 :class:`~src.directional_fdn.DirectionalFDN` needs, one per direction.
 :func:`design_absorption_sos`
 adds the ``(N, 10)`` row-per-line orientation used throughout the package and
@@ -39,24 +37,17 @@ and a target is ten command values on the octave centres 31.25 Hz to 16 kHz,
 :data:`pyFDN.eq.COMMAND_FREQUENCIES` -- the grid :func:`geq_band_frequencies`
 returns.  The design interpolates linearly in hertz between command points
 and holds the end values below 31.25 Hz and above 16 kHz.
-
-pyFDN before 0.5.0 placed the outer two command points at 1 Hz and ``fs``
-instead, so a 16 kHz value was read as if it applied at ``fs``.  Targets
-written for that grid keep their shape but now mean what their position
-suggests: the last value is the T60 at 16 kHz.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from enum import Enum
-from typing import Any
 
 import numpy as np
 import pyFDN
 from numpy.typing import NDArray
 from pyFDN import sample_delay_lengths
-from pyFDN.eq import COMMAND_FREQUENCIES, decay_to_geq
+from pyFDN.eq import COMMAND_FREQUENCIES, decay_to_graphic_eq
 
 from .utils import ms_to_samps
 
@@ -74,7 +65,7 @@ def generate_distinct_delay_lengths(
     """Return *num_delay_lines* distinct integer delay lengths (primes preferred).
 
     Strict pairwise coprimality is impractical when ``num_delay_lines`` is
-    large (e.g. NQ \u2273 200) because the prime count in any usable audio range
+    large (e.g. NQ >= 200) because the prime count in any usable audio range
     is much smaller.  This helper therefore returns *distinct* lengths,
     prioritising primes within the requested range and filling the
     remainder with distinct composites.  Distinct, well-spread lengths are
@@ -102,7 +93,7 @@ def generate_distinct_delay_lengths(
 
     lo, hi = ms_to_samps(np.asarray(delay_range_ms), fs)
 
-    # Sieve of Eratosthenes — adequate for audio-range lengths
+    # Sieve of Eratosthenes -- adequate for audio-range lengths
     sieve = np.ones(hi + 1, dtype=bool)
     sieve[:2] = False
     for i in range(2, int(np.sqrt(hi)) + 1):
@@ -115,7 +106,7 @@ def generate_distinct_delay_lengths(
         rng.shuffle(primes_in_range)
         return primes_in_range[:num_delay_lines].astype(np.int64)
 
-    # Not enough primes — fall back to distinct integer lengths in [lo, hi],
+    # Not enough primes -- fall back to distinct integer lengths in [lo, hi],
     # prioritizing primes. Strict pairwise coprimality is impractical for
     # large delay-line counts; distinct, spread lengths are the standard
     # FDN choice in this regime.
@@ -233,21 +224,6 @@ _GALLERY_TYPES: dict[FeedbackMatrixType, str] = {
 }
 
 
-def _seeded(fn: Callable[..., Any], seed: int | None, *args: Any, **kwargs: Any) -> Any:
-    """Call *fn* with NumPy's global random state seeded, then restore it.
-
-    ``pyFDN``'s matrix generators draw from ``np.random`` and take no seed.
-    Saving and restoring the global state around the call makes them
-    reproducible here while leaving the caller's stream exactly as it was.
-    """
-    state = np.random.get_state()
-    try:
-        np.random.seed(seed)
-        return fn(*args, **kwargs)
-    finally:
-        np.random.set_state(state)
-
-
 class FeedbackMatrix:
     """Scalar feedback matrix for the FDN.
 
@@ -287,7 +263,7 @@ class FeedbackMatrix:
         ):
             raise ValueError(f"Hadamard size must be a power of 2, got {size}.")
 
-        matrix = _seeded(pyFDN.fdn_matrix_gallery, seed, size, gallery_type)
+        matrix = pyFDN.fdn_matrix_gallery(size, gallery_type, rng=seed)
         self.matrix = np.asarray(matrix, dtype=float)
 
 
@@ -351,4 +327,4 @@ def design_absorption_sos(
             f"t60_s must supply one T60 curve per delay line: expected "
             f"{num_delays} rows, got {curves.shape[0]}"
         )
-    return decay_to_geq(curves.T, delays, fs)
+    return decay_to_graphic_eq(curves.T, delays, fs)

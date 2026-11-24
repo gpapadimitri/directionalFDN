@@ -10,12 +10,12 @@ channel per incident direction on a spatial grid.
 Architecture
 ------------
 1. **Input** ``x(n)`` is encoded to Ambisonics via input gains ``b_i`` (Eq. 17).
-2. **Delay-line groups** ``s_i(n)`` — *N* groups of *Q* Ambisonics channels each.
-3. **Feedback matrix** ``A ⊗ I_Q`` — Kronecker product of an *N×N* unitary
-   matrix with the *Q×Q* identity (Eq. 20).
-4. **Transform** ``T_i`` — optional directional weighting for anisotropic
+2. **Delay-line groups** ``s_i(n)`` -- *N* groups of *Q* Ambisonics channels each.
+3. **Feedback matrix** ``A kron I_Q`` -- Kronecker product of an *NxN* unitary
+   matrix with the *QxQ* identity (Eq. 20).
+4. **Transform** ``T_i`` -- optional directional weighting for anisotropic
    decay (Section 3).
-5. **Output** ``y(n) = Σ g_i (c_i · s_i(n)) + d · x(n)`` (Eq. 22).
+5. **Output** ``y(n) = sum_i g_i (c_i * s_i(n)) + d * x(n)`` (Eq. 22).
 
 Usage
 -----
@@ -45,6 +45,7 @@ from .fdn_components import (
     generate_delay_lengths,
 )
 from .transform import DirectionalWeighting
+from .utils import db2lin
 
 
 class DFDN2019:
@@ -52,10 +53,10 @@ class DFDN2019:
 
     Archival; see :class:`~src.directional_fdn.DirectionalFDN`.
 
-    A :class:`pyFDN.FDNBuild` with:
+    A :class:`pyFDN.DSS` with:
 
-    * delay lines organised into **groups** (N groups × Q channels),
-    * Kronecker-product feedback ``A ⊗ I_Q``,
+    * delay lines organised into **groups** (N groups x Q channels),
+    * Kronecker-product feedback ``A kron I_Q``,
     * optional directional weighting ``T_i`` for anisotropic decay,
     * Ambisonics-encoded I/O.
 
@@ -64,9 +65,9 @@ class DFDN2019:
     sample_rate : float
         Sample rate in Hz.
     num_delay_line_groups : int
-        *N* — number of delay-line groups.
+        *N* -- number of delay-line groups.
     ambisonics_order : int
-        Ambisonics order (1 → 4 ch, 2 → 9 ch, 3 → 16 ch).
+        Ambisonics order (1 -> 4 ch, 2 -> 9 ch, 3 -> 16 ch).
     seed : int, optional
         Random seed for reproducibility.
     """
@@ -112,11 +113,11 @@ class DFDN2019:
         delay_range_ms : (float, float)
             Range for coprime delay-line lengths.
         des_t60_ms : float or NDArray
-            Desired T60 (ms).  Scalar → homogeneous; a ``(10,)`` array →
+            Desired T60 (ms).  Scalar -> homogeneous; a ``(10,)`` array ->
             frequency-dependent, on the graphic EQ's own grid (see
             :func:`~src.fdn_components.geq_band_frequencies`).
         feedback_type : FeedbackMatrixType
-            Type of base N×N feedback matrix.
+            Type of base NxN feedback matrix.
         rng : np.random.Generator, optional
             Random generator for delay-length selection.
         """
@@ -131,7 +132,7 @@ class DFDN2019:
         # Replicate for all Q channels per group
         self.delay_length_samps = np.repeat(group_lengths, Q).astype(np.int64)
 
-        # 2. Feedback matrix  A ⊗ I_Q
+        # 2. Feedback matrix  A kron I_Q
         self._init_kronecker_feedback(feedback_type)
 
         # 3. Absorption
@@ -151,7 +152,7 @@ class DFDN2019:
             raise RuntimeError("Call setup() before init_absorption().")
         t60_s = np.asarray(des_t60_ms, dtype=float) * 1e-3
         if t60_s.ndim == 0:
-            self.absorption_gains = pyFDN.db_to_lin(
+            self.absorption_gains = db2lin(
                 pyFDN.rt_to_slope(t60_s, self.sample_rate) * self.delay_length_samps
             )
             self.absorption_sos = None
@@ -273,18 +274,17 @@ class DFDN2019:
         if input_data.shape[0] != 1:
             raise ValueError("Input must be mono (1 channel).")
 
-        build = self._fdn_build(source_azimuth, source_elevation)
+        dss = self._dss(source_azimuth, source_elevation)
         x = np.asarray(input_data, dtype=float)
-        return pyFDN.build_to_td(build).process_signal(x.T).T
+        graph = pyFDN.dss_to_td(*dss, post_delay=self.absorption_sos)
+        return graph.process_signal(x.T).T
 
     # ==================================================================
     # Internal helpers
     # ==================================================================
 
-    def _fdn_build(
-        self, source_azimuth: float, source_elevation: float
-    ) -> pyFDN.FDNBuild:
-        """The network for one source direction, as a pyFDN build."""
+    def _dss(self, source_azimuth: float, source_elevation: float) -> pyFDN.DSS:
+        """The network for one source direction; absorption goes in ``post_delay``."""
         A = self._effective_feedback_matrix()
         C = self._build_output_gains()
         if self.absorption_gains is not None:
@@ -300,14 +300,12 @@ class DFDN2019:
             source_azimuth, source_elevation, self.ambisonics_order
         ).reshape(self.num_outputs, 1)
 
-        return pyFDN.FDNBuild(
+        return pyFDN.DSS(
+            delays=self.delay_length_samps,
             A=A,
             B=self._build_input_gains(),
             C=C,
             D=D,
-            delays=self.delay_length_samps,
-            fs=float(self.sample_rate),
-            post_delay=self.absorption_sos,
         )
 
     def _effective_feedback_matrix(self) -> NDArray:
@@ -339,7 +337,7 @@ class DFDN2019:
     def _init_kronecker_feedback(
         self, matrix_type: FeedbackMatrixType
     ) -> None:
-        """Build A ⊗ I_Q (Eq. 20)."""
+        """Build A kron I_Q (Eq. 20)."""
         base = FeedbackMatrix(
             self.num_delay_line_groups,
             matrix_type,
@@ -349,15 +347,12 @@ class DFDN2019:
         I_Q = np.eye(self.Q)
         self._kronecker_matrix = np.kron(self._base_feedback_matrix, I_Q)
 
-        # Verify unitarity
-        err = np.linalg.norm(
-            self._kronecker_matrix.T @ self._kronecker_matrix
-            - np.eye(self.num_delay_lines),
-            "fro",
-        )
-        if err > 1e-10:
+        # A kron I_Q is lossless exactly when A is, and pyFDN's test does not
+        # recognise the product of a diagonally-similar A, so test A itself.
+        if not pyFDN.is_unilossless(self._base_feedback_matrix, tol=1e-8):
             raise RuntimeError(
-                f"Kronecker feedback matrix unitarity error: {err:.2e}"
+                "Kronecker feedback matrix is not lossless; the recursion "
+                "would not preserve energy."
             )
 
     def _build_input_gains(self) -> NDArray:

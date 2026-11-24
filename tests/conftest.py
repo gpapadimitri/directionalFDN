@@ -29,7 +29,7 @@ def measured_t60():
 
     def _measure(ir: np.ndarray, sample_rate: float) -> np.ndarray:
         rt, _ = pyFDN.estimate_rt_bands(
-            np.asarray(ir).ravel(), sample_rate, n=8, start=-4
+            np.asarray(ir).ravel(), sample_rate, num_bands=8, lowest_octave=-4
         )
         return rt
 

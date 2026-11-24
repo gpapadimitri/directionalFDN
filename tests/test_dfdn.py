@@ -45,21 +45,21 @@ class TestSpatial:
     _W = 1.0
 
     def test_encode_front(self):
-        """Front direction (0, 0) → W active, X active (ACN 3)."""
+        """Front direction (0, 0) -> W active, X active (ACN 3)."""
         c = encode_directions(0.0, 0.0, order=1)
         np.testing.assert_allclose(
             c, [self._W, 0.0, 0.0, self._W], atol=1e-12,
         )
 
     def test_encode_left(self):
-        """Left direction (π/2, 0) → W active, Y active (ACN 1)."""
+        """Left direction (pi/2, 0) -> W active, Y active (ACN 1)."""
         c = encode_directions(np.pi / 2, 0.0, order=1)
         np.testing.assert_allclose(
             c, [self._W, self._W, 0.0, 0.0], atol=1e-12,
         )
 
     def test_encode_up(self):
-        """Up direction (0, π/2) → W active, Z active (ACN 2)."""
+        """Up direction (0, pi/2) -> W active, Z active (ACN 2)."""
         c = encode_directions(0.0, np.pi / 2, order=1)
         np.testing.assert_allclose(
             c, [self._W, 0.0, self._W, 0.0], atol=1e-12,
@@ -284,7 +284,7 @@ class TestDirectionalFDN:
 
     def test_basic_setup(self):
         pw = self._make()
-        Q = pw.Q  # grid size (t-design may differ from (L+1)²)
+        Q = pw.Q  # grid size (t-design may differ from (L+1)^2)
         assert pw.total_delay_lines == 4 * Q
         assert len(pw.delay_length_samps) == 4 * Q
         assert pw.delay_length_samps is not None
@@ -336,7 +336,7 @@ class TestDirectionalFDN:
             sh_order=1,
             seed=42,
         )
-        # Init grid first to learn actual Q (t-design may differ from (L+1)²)
+        # Init grid first to learn actual Q (t-design may differ from (L+1)^2)
         pw._init_grid()
         Q = pw.Q
         t60_dir = np.linspace(400.0, 1000.0, Q)
@@ -352,7 +352,7 @@ class TestDirectionalFDN:
         assert np.std(channel_energies) > 0
 
     def test_freq_dependent_isotropic(self):
-        """Frequency-dependent but isotropic T60 (n_bands,) — most common case."""
+        """Frequency-dependent but isotropic T60 (n_bands,) -- most common case."""
         pw = DirectionalFDN(
             sample_rate=48000,
             num_delay_line_groups=4,

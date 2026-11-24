@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=61.0"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
@@ -10,6 +10,7 @@ include = ["src", "src.*"]
 name = "directional_fdn"
 version = "0.1.0"
 description = "Directional Feedback Delay Network (DFDN) for Ambisonics RIR synthesis"
+readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
 authors = [
@@ -21,14 +22,14 @@ dependencies = [
     "pyfar>=0.8",
     "spharpy>=1.0",
     "pyrato>=1.0",
-    "pyFDN>=0.5.0",
+    "pyFDN>=0.6.0",
+    "matplotlib",
 ]
 
 [project.optional-dependencies]
 dev = [
     "pytest>=7",
     "ruff",
-    "matplotlib",
     "soundfile",
 ]
 
