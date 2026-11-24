@@ -9,15 +9,16 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import numpy as np
+import pyfar as pf
 from numpy.typing import NDArray
 
-from .air import SPEED_OF_SOUND as _SPEED_OF_SOUND
 from .air import Atmosphere
+from .utils import db2lin
 
 
 def delay_range_from_room(
     room: tuple[float, float, float],
-    speed_of_sound: float = _SPEED_OF_SOUND,
+    speed_of_sound: float = pf.constants.reference_speed_of_sound,
     spread: tuple[float, float] = (0.4, 2.0),
 ) -> tuple[float, float]:
     """Compute FDN delay range (ms) from room dimensions.
@@ -152,7 +153,7 @@ def shoebox_reflections(
     receiver: tuple[float, float, float],
     sample_rate: float,
     t60_broadband_s: float,
-    speed_of_sound: float = _SPEED_OF_SOUND,
+    speed_of_sound: float = pf.constants.reference_speed_of_sound,
     model: str = "eyring",
     *,
     order: int = 1,
@@ -236,7 +237,9 @@ def shoebox_reflections(
             # whole path the reflection actually travelled.
             band_gains = r_wall_band**reflection_order / distance
             if atmosphere is not None:
-                band_gains = band_gains * atmosphere.path_gain(freqs, distance)
+                band_gains = band_gains * db2lin(
+                    -atmosphere.alpha_db_per_m(freqs) * distance
+                )
 
         reflections.append(
             Reflection(

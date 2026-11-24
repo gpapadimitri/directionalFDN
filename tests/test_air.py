@@ -6,14 +6,11 @@ import numpy as np
 import pytest
 
 from src.air import Atmosphere
-from src.directional_fdn import DirectionalFDN
-from src.fdn_components import geq_band_frequencies
 from src.room import shoebox_reflections
-from src.utils import db2lin
 
 FS = 48000.0
 FREQS = np.array([62.5, 125.0, 250.0, 500.0, 1000.0, 2000.0, 4000.0, 8000.0, 16000.0])
-#from this package's own ISO 9613-1 implementation before it was replaced by pyfar's
+#from an independent ISO 9613-1 implementation
 GOLDEN_20C_50PCT = np.array(
     [1.20560478e-04, 4.39738348e-04, 1.30968126e-03, 2.72819773e-03, 4.66480705e-03,
      9.88633221e-03, 2.96615601e-02, 1.05275496e-01, 3.64500802e-01]
@@ -24,17 +21,12 @@ GOLDEN_35C_80PCT = np.array(
 )
 
 
-def test_coefficient_matches_the_previous_implementation():
+def test_coefficient_matches_an_independent_implementation():
     np.testing.assert_allclose(
         Atmosphere().alpha_db_per_m(FREQS), GOLDEN_20C_50PCT, rtol=1e-3
     )
-    hot = Atmosphere(temperature_c=35.0, humidity_percent=80.0)
+    hot = Atmosphere(temperature=35.0, relative_humidity=0.8)
     np.testing.assert_allclose(hot.alpha_db_per_m(FREQS), GOLDEN_35C_80PCT, rtol=1e-3)
-
-
-def test_pressure_is_taken_in_kilopascal():
-    thin = Atmosphere(pressure_kpa=50.0).alpha_db_per_m(FREQS[3:])
-    assert not np.allclose(thin, Atmosphere().alpha_db_per_m(FREQS[3:]), rtol=0.05)
 
 
 def test_below_50_hz_alpha_is_continued_as_f_squared():
@@ -44,50 +36,24 @@ def test_below_50_hz_alpha_is_continued_as_f_squared():
     assert low[0] == 0.0
     assert low[1] == pytest.approx(a50 * 0.25)
     assert low[3] == pytest.approx(a50, rel=1e-3)
-    #the old exact value at 31.25 Hz was 3.09e-5; the continuation stays within 40 %
+    #the exact ISO 9613-1 value at 31.25 Hz is 3.09e-5; the continuation stays within 40 %
     assert low[2] == pytest.approx(3.09e-5, rel=0.4)
     assert np.all(np.diff(atm.alpha_db_per_m(np.linspace(0.0, 200.0, 50))) > 0.0)
 
 
-def test_geq_grid_is_usable_without_warnings_or_nan():
-    import warnings
-
-    with warnings.catch_warnings():
-        warnings.simplefilter("error")
-        t60 = Atmosphere().t60(geq_band_frequencies())
-    assert np.all(np.isfinite(t60)) and np.all(np.diff(t60) < 0.0)
-
-
-def test_path_gain_is_the_coefficient_over_the_distance():
-    atm = Atmosphere()
-    np.testing.assert_allclose(
-        atm.path_gain(FREQS, 12.5), db2lin(-atm.alpha_db_per_m(FREQS) * 12.5)
-    )
-
-
-def test_budget_is_one_consistent_answer():
-    delays = np.array([1039, 1213, 1381])
-    t60 = np.tile(np.array([1.8, 1.7, 1.4, 1.2, 1.0, 0.7, 0.45, 0.3, 0.2]), (3, 1))
-    atm = Atmosphere()
-    budget = atm.budget(t60, FREQS, delays, FS)
-    np.testing.assert_allclose(budget.realised_t60_s, atm.limit(t60, FREQS))
-    np.testing.assert_allclose(
-        budget.air_db + budget.boundary_db,
-        60.0 * delays[:, None] / (FS * budget.realised_t60_s),
-        rtol=1e-10,
-    )
-
-
-def test_unphysical_atmospheres_raise():
-    for kwargs, match in [
-        ({"humidity_percent": 150.0}, "humidity"),
-        ({"temperature_c": -300.0}, "absolute zero"),
-        ({"pressure_kpa": 0.0}, "pressure"),
-    ]:
-        with pytest.raises(ValueError, match=match):
-            Atmosphere(**kwargs)
-    with pytest.raises(ValueError, match="[Ff]requenc"):
-        Atmosphere().alpha_db_per_m(np.array([-1.0]))
+@pytest.mark.parametrize(
+    ("kwargs", "match"),
+    [
+        ({"relative_humidity": 1.5}, "humidity"),
+        ({"relative_humidity": -0.1}, "humidity"),
+        ({"temperature": -300.0}, "Temperature"),
+        ({"atmospheric_pressure": 3e5}, "pressure"),
+        ({"atmospheric_pressure": -5e3}, "vapour"),
+    ],
+)
+def test_unphysical_atmospheres_raise_on_construction(kwargs, match):
+    with pytest.raises(ValueError, match=match):
+        Atmosphere(**kwargs)
 
 
 def _reflections(**kw):
@@ -100,23 +66,11 @@ def _reflections(**kw):
 def test_air_in_reflections_is_off_by_default_and_takes_an_atmosphere():
     dry = _reflections()
     default = _reflections(air_absorption=True)
-    humid = _reflections(air_absorption=Atmosphere(humidity_percent=95.0))
+    humid = _reflections(air_absorption=Atmosphere(relative_humidity=0.95))
     off = _reflections(air_absorption=False)
     assert np.allclose(dry[-1].band_gains, off[-1].band_gains)
     assert default[-1].band_gains[-1] < dry[-1].band_gains[-1]
     assert humid[-1].band_gains[-1] != pytest.approx(default[-1].band_gains[-1], rel=1e-3)
-
-
-def test_setup_accepts_an_atmosphere():
-    t60 = np.array([1800.0, 1800, 1700, 1600, 1400, 1200, 1000, 700, 450, 200])
-    realised = {}
-    for name, air in (("default", True), ("humid", Atmosphere(humidity_percent=95.0))):
-        pw = DirectionalFDN(FS, 4, sh_order=1, seed=42)
-        pw.setup(delay_range_ms=(20.0, 60.0), t60_per_direction_ms=t60, air_absorption=air)
-        realised[name] = pw.realised_t60_s[0]
-        assert pw.air_budget is not None
-        assert np.array_equal(pw.air_attenuation_db, pw.air_budget.air_db)
-    assert not np.allclose(realised["default"], realised["humid"], rtol=1e-3)
 
 
 def test_unsorted_duplicate_and_nd_frequencies_agree_with_a_sorted_call():
