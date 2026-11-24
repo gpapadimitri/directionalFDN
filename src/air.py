@@ -8,9 +8,6 @@ import numpy as np
 import pyfar as pf
 from numpy.typing import NDArray
 
-#: pyfar's lowest frequency for ISO 9613-1
-_MIN_HZ = 50.0
-
 
 @dataclass(frozen=True)
 class Atmosphere:
@@ -44,9 +41,9 @@ class Atmosphere:
         if np.any(f < 0.0):
             raise ValueError(f"Frequencies must be non-negative, got min {f.min()} Hz.")
         #pyfar wants one strictly increasing grid from 50 Hz
-        grid, inverse = np.unique(np.maximum(f, _MIN_HZ), return_inverse=True)
+        grid, inverse = np.unique(np.maximum(f, 50.0), return_inverse=True)
         alpha, _, _ = pf.constants.air_attenuation(
             self.temperature, grid, self.relative_humidity, self.atmospheric_pressure
         )
         alpha = np.asarray(alpha, dtype=float).ravel()[inverse].reshape(f.shape)
-        return alpha * np.minimum(f / _MIN_HZ, 1.0) ** 2
+        return alpha * np.minimum(f / 50.0, 1.0) ** 2

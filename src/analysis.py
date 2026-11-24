@@ -15,9 +15,6 @@ from pyrato.parameters import reverberation_time_linear_regression
 
 from . import spatial
 
-#pyrato's ISO 3382 intervals, needed here for the truncation guard
-_DECAY_INTERVALS_DB = {"EDT": (-0.1, -10.1), "T20": (-5.0, -25.0), "T30": (-5.0, -35.0)}
-
 
 def octave_bands(x: NDArray, fs: float, bands: NDArray) -> NDArray:
     """Octave-band split along the last axis, band axis first: (B, C, n)."""
@@ -81,11 +78,10 @@ def decay_fit(
         pyfar's filters; compare it relatively there. NaN where the fit
         window is too close to the end of the signal.
     """
-    if parameter not in _DECAY_INTERVALS_DB:
-        raise ValueError(
-            f"parameter must be one of {sorted(_DECAY_INTERVALS_DB)}, got {parameter!r}."
-        )
-    upper, lower = _DECAY_INTERVALS_DB[parameter]
+    #pyrato's ISO 3382 intervals, needed here for the truncation guard
+    upper, lower = {
+        "EDT": (-0.1, -10.1), "T20": (-5.0, -25.0), "T30": (-5.0, -35.0)
+    }[parameter]
     bands = np.asarray(bands, dtype=float)
     edc = schroeder_integration(pf.Signal(octave_bands(x, fs, bands), fs)).time
     n = edc.shape[-1]
@@ -173,10 +169,6 @@ def predicted_beam_decay(
     NDArray, shape (D, B)
         Predicted decay time in seconds.
     """
-    if parameter not in _DECAY_INTERVALS_DB:
-        raise ValueError(
-            f"parameter must be one of {sorted(_DECAY_INTERVALS_DB)}, got {parameter!r}."
-        )
     t = np.arange(int(length_s * fs)) / fs
     weights = np.asarray(beam_from_grid, dtype=float) ** 2
     t60_ms = np.asarray(t60_ms, dtype=float)
