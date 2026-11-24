@@ -80,7 +80,6 @@ from .fdn_components import (
     geq_band_frequencies,
 )
 from .room import Reflection
-from .utils import db2lin
 
 # ---------------------------------------------------------------------------
 # Early Reflection Module (Eqs. 3-5)
@@ -423,9 +422,8 @@ class DirectionalFDN:
         if t60_expanded.ndim == 1:
             # Broadband: one scalar gain per channel, round trip = m exactly.
             t60_s = np.maximum(t60_expanded, 1.0) * 1e-3
-            self.absorption_gains = db2lin(
-                -60.0 * all_lengths / (self.sample_rate * t60_s)
-            )
+            loss_db = -60.0 * all_lengths / (self.sample_rate * t60_s)
+            self.absorption_gains = 10.0 ** (loss_db / 20.0)
             self.absorption_sos = None
             if air_absorption:
                 warnings.warn(

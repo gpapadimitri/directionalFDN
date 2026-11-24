@@ -9,11 +9,11 @@ from src import spatial
 from src.analysis import (
     band_correlation,
     decay_fit,
+    energy_decay_deviation,
     mean_offdiag_abs,
     predicted_beam_decay,
     sh_to_beams,
 )
-from src.utils import energy_decay_deviation
 
 FS = 48000
 BANDS = np.array([62.5, 125.0, 250.0, 500.0, 1000.0, 2000.0, 4000.0, 8000.0])

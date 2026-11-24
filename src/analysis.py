@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import numpy as np
 import pyfar as pf
+import pyFDN
 from numpy.typing import NDArray
 from pyrato.edc import schroeder_integration
 from pyrato.parameters import reverberation_time_linear_regression
@@ -185,3 +186,15 @@ def predicted_beam_decay(
                 pf.TimeData(edc / edc[:, :1], t), T=parameter
             )
     return out
+
+
+def energy_decay_deviation(directional_irs: NDArray) -> NDArray:
+    """Energy decay deviation per direction in dB, shape of the input.
+
+    Alary et al., J. Acoust. Soc. Am. 149(5), 2021, Eqs. 4-7: each direction's
+    EDC in dB minus the mean across directions at the same instant. Pass the
+    grid output of :meth:`~src.directional_fdn.DirectionalFDN.render` to keep
+    beamforming out of the measurement.
+    """
+    edc_db = 10.0 * np.log10(pyFDN.edc(np.asarray(directional_irs, float), axis=-1) + 1e-30)
+    return edc_db - edc_db.mean(axis=0)

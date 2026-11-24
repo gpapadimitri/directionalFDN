@@ -13,7 +13,6 @@ import pyfar as pf
 from numpy.typing import NDArray
 
 from .air import Atmosphere
-from .utils import db2lin
 
 
 def delay_range_from_room(
@@ -237,8 +236,8 @@ def shoebox_reflections(
             # whole path the reflection actually travelled.
             band_gains = r_wall_band**reflection_order / distance
             if atmosphere is not None:
-                band_gains = band_gains * db2lin(
-                    -atmosphere.alpha_db_per_m(freqs) * distance
+                band_gains = band_gains * 10.0 ** (
+                    -atmosphere.alpha_db_per_m(freqs) * distance / 20.0
                 )
 
         reflections.append(

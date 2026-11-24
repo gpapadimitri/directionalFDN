@@ -45,7 +45,6 @@ from .fdn_components import (
     generate_delay_lengths,
 )
 from .transform import DirectionalWeighting
-from .utils import db2lin
 
 
 class DFDN2019:
@@ -152,9 +151,8 @@ class DFDN2019:
             raise RuntimeError("Call setup() before init_absorption().")
         t60_s = np.asarray(des_t60_ms, dtype=float) * 1e-3
         if t60_s.ndim == 0:
-            self.absorption_gains = db2lin(
-                pyFDN.rt_to_slope(t60_s, self.sample_rate) * self.delay_length_samps
-            )
+            slope_db = pyFDN.rt_to_slope(t60_s, self.sample_rate)
+            self.absorption_gains = 10.0 ** (slope_db * self.delay_length_samps / 20.0)
             self.absorption_sos = None
         else:
             self.absorption_sos = design_absorption_sos(

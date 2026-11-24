@@ -49,8 +49,6 @@ from numpy.typing import NDArray
 from pyFDN import sample_delay_lengths
 from pyFDN.eq import COMMAND_FREQUENCIES, decay_to_graphic_eq
 
-from .utils import ms_to_samps
-
 # ---------------------------------------------------------------------------
 # Delay lengths
 # ---------------------------------------------------------------------------
@@ -91,7 +89,7 @@ def generate_distinct_delay_lengths(
     if rng is None:
         rng = np.random.default_rng()
 
-    lo, hi = ms_to_samps(np.asarray(delay_range_ms), fs)
+    lo, hi = pyFDN.ms_to_samples(np.asarray(delay_range_ms), fs)
 
     # Sieve of Eratosthenes -- adequate for audio-range lengths
     sieve = np.ones(hi + 1, dtype=bool)
@@ -167,7 +165,7 @@ def generate_delay_lengths(
     NDArray of int64
         Delay-line lengths in samples.
     """
-    lo, hi = (int(v) for v in ms_to_samps(np.asarray(delay_range_ms, dtype=float), fs))
+    lo, hi = (int(v) for v in pyFDN.ms_to_samples(np.asarray(delay_range_ms), fs))
 
     candidate = sample_delay_lengths(
         num_delay_lines,
