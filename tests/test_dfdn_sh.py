@@ -1,4 +1,4 @@
-"""DFDN2019, the spherical-harmonic network of Alary et al. (JAES 2019)."""
+"""SHDirectionalFDN, the spherical-harmonic network of Alary et al. (JAES 2019)."""
 
 from __future__ import annotations
 
@@ -7,14 +7,14 @@ import pyFDN
 import pytest
 
 from src import spatial
-from src.dfdn_2019 import DFDN2019
+from src.dfdn_sh import SHDirectionalFDN
 from src.transform import DirectionalWeighting
 
 FS = 48000.0
 
 
 def test_broadband_t60_is_accurate(measured_t60):
-    dfdn = DFDN2019(FS, 8, ambisonics_order=1, seed=42)
+    dfdn = SHDirectionalFDN(FS, 8, ambisonics_order=1, seed=42)
     dfdn.setup(delay_range_ms=(20.0, 60.0), des_t60_ms=1500.0)
     rir = dfdn.render(0.0, 0.0, length_seconds=4.0)
     np.testing.assert_allclose(measured_t60(rir[0], FS)[1:], 1.5, rtol=0.08)
@@ -23,7 +23,7 @@ def test_broadband_t60_is_accurate(measured_t60):
 def test_direct_sound_is_the_sh_encoding_for_any_group_count():
     #Eq. 11: d = y(phi_0, theta_0), no 1/N
     for groups in (4, 8, 16):
-        dfdn = DFDN2019(FS, groups, ambisonics_order=1, seed=0)
+        dfdn = SHDirectionalFDN(FS, groups, ambisonics_order=1, seed=0)
         dfdn.setup(delay_range_ms=(20.0, 60.0), des_t60_ms=1000.0)
         assert dfdn.render(0.0, 0.0, length_seconds=0.2)[0, 0] == pytest.approx(1.0)
 
@@ -49,7 +49,7 @@ def test_anisotropy_is_realised():
     order = 2
     az, el = spatial.quadrature_grid(10)
     t60 = np.where(np.cos(az) > 0, 2.0, 0.6) * 1e3
-    dfdn = DFDN2019(FS, 8, ambisonics_order=order, seed=42)
+    dfdn = SHDirectionalFDN(FS, 8, ambisonics_order=order, seed=42)
     dfdn.setup(delay_range_ms=(20.0, 60.0), des_t60_ms=1500.0)
     dfdn.set_directional_decay(t60, az, el)
     rir = dfdn.render(0.0, 0.0, length_seconds=6.0)

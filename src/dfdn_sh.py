@@ -19,8 +19,8 @@ Architecture
 
 Usage
 -----
->>> from src.dfdn_2019 import DFDN2019
->>> dfdn = DFDN2019(
+>>> from src.dfdn_sh import SHDirectionalFDN
+>>> dfdn = SHDirectionalFDN(
 ...     sample_rate=48000,
 ...     num_delay_line_groups=4,
 ...     ambisonics_order=1,
@@ -47,7 +47,7 @@ from .fdn_components import (
 from .transform import DirectionalWeighting
 
 
-class DFDN2019:
+class SHDirectionalFDN:
     """Directional Feedback Delay Network, spherical-harmonic domain (Alary et al. 2019).
 
     Archival; see :class:`~src.directional_fdn.DirectionalFDN`.

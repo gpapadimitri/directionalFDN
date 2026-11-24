@@ -6,7 +6,7 @@ delay-line groups where each channel corresponds to an incident direction on a
 spatial grid of Q directions" (Sec. 3). This is the package's working
 reverberator. The spherical-harmonic formulation it replaces (Alary et al.,
 J. Audio Eng. Soc. 67(10), 2019) is kept for comparison as
-:class:`~src.dfdn_2019.DFDN2019`.
+:class:`~src.dfdn_sh.SHDirectionalFDN`.
 
 Architecture
 ------------
